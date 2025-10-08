@@ -11,7 +11,7 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "prepare": "npm run build",
-    "start": "node auth-server.js"
+    "start": "node mcp-server.js"
   },
   "keywords": [
     "mcp",
@@ -29,7 +29,8 @@
     "express": "^5.1.0",
     "express-session": "^1.18.2",
     "jsonwebtoken": "^9.0.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "sse": "^0.0.8"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
