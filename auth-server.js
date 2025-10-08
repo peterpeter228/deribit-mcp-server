@@ -220,6 +220,19 @@ app.get('/', (req, res) => {
   });
 });
 
+// OAuth configuration/discovery endpoint
+app.get('/.well-known/oauth-authorization-server', (req, res) => {
+  const baseUrl = `https://${req.get('host')}`;
+  res.json({
+    issuer: baseUrl,
+    authorization_endpoint: `${baseUrl}/oauth/authorize`,
+    token_endpoint: `${baseUrl}/oauth/token`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'],
+    token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic']
+  });
+});
+
 // Get available tools (requires authentication)
 app.get('/api/tools', authenticateToken, (req, res) => {
   const tools = [
