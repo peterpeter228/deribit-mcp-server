@@ -2,6 +2,11 @@ services:
   - type: web
     name: deribit-mcp-server
     env: node
-    buildCommand: npm install && npm run build
-    startCommand: npm start
-    healthCheckPath: /
+    plan: free
+    buildCommand: npm install
+    startCommand: node mcp-sse-oauth-server.js
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NODE_ENV
+        value: production
