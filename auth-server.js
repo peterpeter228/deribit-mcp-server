@@ -12,6 +12,15 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 
+// OAuth Client Credentials - These are what Claude will use
+const OAUTH_CLIENTS = {
+  'deribit-mcp-client': {
+    client_secret: 'deribit-secret-2025-secure',
+    name: 'Claude Desktop',
+    allowed: true
+  }
+};
+
 // Store for authorization codes and tokens (in production, use a database)
 const authCodes = new Map();
 const refreshTokens = new Map();
@@ -29,9 +38,22 @@ app.use(session({
 // Deribit API proxy
 const DERIBIT_API_BASE = 'https://www.deribit.com/api/v2';
 
+// Middleware to validate client credentials
+function validateClient(client_id, client_secret) {
+  const client = OAUTH_CLIENTS[client_id];
+  if (!client) return false;
+  if (client_secret && client.client_secret !== client_secret) return false;
+  return client.allowed;
+}
+
 // OAuth endpoints
 app.get('/oauth/authorize', (req, res) => {
   const { client_id, redirect_uri, response_type, state } = req.query;
+  
+  // Validate client_id
+  if (!OAUTH_CLIENTS[client_id]) {
+    return res.status(400).send('Invalid client_id');
+  }
   
   // Simple authorization page
   res.send(`
@@ -78,7 +100,7 @@ app.get('/oauth/authorize', (req, res) => {
     <body>
       <div class="container">
         <h2>Authorize Deribit MCP Server</h2>
-        <p class="info">Enter any email to authorize access to Deribit market data</p>
+        <p class="info">Enter your email to authorize ${OAUTH_CLIENTS[client_id].name} to access Deribit market data</p>
         <form action="/oauth/authorize" method="post">
           <input type="email" name="email" placeholder="Email" required />
           <input type="hidden" name="client_id" value="${client_id}" />
@@ -95,6 +117,11 @@ app.get('/oauth/authorize', (req, res) => {
 
 app.post('/oauth/authorize', (req, res) => {
   const { email, client_id, redirect_uri, response_type, state } = req.body;
+  
+  // Validate client
+  if (!validateClient(client_id)) {
+    return res.status(400).send('Invalid client');
+  }
   
   // Generate authorization code
   const code = crypto.randomBytes(32).toString('hex');
@@ -121,7 +148,12 @@ app.post('/oauth/authorize', (req, res) => {
 });
 
 app.post('/oauth/token', async (req, res) => {
-  const { grant_type, code, refresh_token, client_id, redirect_uri } = req.body;
+  const { grant_type, code, refresh_token, client_id, client_secret } = req.body;
+  
+  // Validate client credentials
+  if (!validateClient(client_id, client_secret)) {
+    return res.status(401).json({ error: 'invalid_client' });
+  }
   
   if (grant_type === 'authorization_code') {
     // Exchange authorization code for tokens
@@ -134,6 +166,11 @@ app.post('/oauth/token', async (req, res) => {
     if (Date.now() > authData.expiresAt) {
       authCodes.delete(code);
       return res.status(400).json({ error: 'expired_token' });
+    }
+    
+    // Verify client_id matches
+    if (authData.client_id !== client_id) {
+      return res.status(400).json({ error: 'invalid_grant' });
     }
     
     // Generate tokens
@@ -165,6 +202,11 @@ app.post('/oauth/token', async (req, res) => {
     const tokenData = refreshTokens.get(refresh_token);
     
     if (!tokenData) {
+      return res.status(400).json({ error: 'invalid_grant' });
+    }
+    
+    // Verify client_id matches
+    if (tokenData.client_id !== client_id) {
       return res.status(400).json({ error: 'invalid_grant' });
     }
     
@@ -345,4 +387,6 @@ app.post('/api/call', authenticateToken, async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Deribit MCP OAuth Server running on port ${PORT}`);
+  console.log(`OAuth Client ID: deribit-mcp-client`);
+  console.log(`OAuth Client Secret: deribit-secret-2025-secure`);
 });
