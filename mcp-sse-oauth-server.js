@@ -12,7 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(express.urlenmcoded({ extended: true }));
+app.use(express.urlencoded({ extended: true }));
 
 // Deribit API Configuration
 const DERIBIT_API_BASE = 'https://www.deribit.com/api/v2';
