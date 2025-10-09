@@ -13,6 +13,18 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Log storage for debugging
+const logs = [];
+const MAX_LOGS = 200;
+
+function addLog(message) {
+  const timestamp = new Date().toISOString();
+  const logEntry = `[${timestamp}] ${message}`;
+  logs.unshift(logEntry);
+  if (logs.length > MAX_LOGS) logs.pop();
+  console.log(message);
+}
+
 // Enable CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -162,6 +174,7 @@ function createMCPServer() {
 
 // Health check root
 app.get('/', (req, res) => {
+  addLog('GET / - Health check request');
   res.json({
     status: 'ok',
     name: 'Deribit MCP Server',
@@ -172,13 +185,26 @@ app.get('/', (req, res) => {
   });
 });
 
+// Logs endpoint - view live logs in browser
+app.get('/logs', (req, res) => {
+  addLog('GET /logs - Logs viewer accessed');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  
+  const logsText = logs.length > 0 
+    ? logs.join('\n\n') 
+    : 'No logs yet. Try connecting from Claude to generate logs.';
+  
+  res.send(`=== DERIBIT MCP SERVER LOGS ===\n\n${logsText}\n\n=== END OF LOGS ===`);
+});
+
 // Streamable HTTP MCP endpoint - handle both GET and POST
 app.all('/mcp', async (req, res) => {
   const sessionId = req.headers['mcp-session-id'] || crypto.randomBytes(16).toString('hex');
   
   // Handle GET request - return server info
   if (req.method === 'GET') {
-    console.log(`MCP GET request - Health check`);
+    addLog(`MCP GET request - Health check`);
     return res.json({
       status: 'ok',
       name: 'deribit-mcp-server',
@@ -193,8 +219,8 @@ app.all('/mcp', async (req, res) => {
   
   // Handle POST request
   if (req.method === 'POST') {
-    console.log(`MCP POST request - Session: ${sessionId}`);
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    addLog(`MCP POST request - Session: ${sessionId}`);
+    addLog(`Request body: ${JSON.stringify(req.body, null, 2)}`);
     
     try {
       const isInitialize = req.body?.method === 'initialize';
@@ -207,7 +233,7 @@ app.all('/mcp', async (req, res) => {
           start: async () => {},
           close: async () => {},
           send: async (message) => {
-            console.log('Server sending:', JSON.stringify(message, null, 2));
+            addLog(`Server sending: ${JSON.stringify(message, null, 2)}`);
           },
         };
         
@@ -215,7 +241,7 @@ app.all('/mcp', async (req, res) => {
         
         session = { mcpServer, connected: true };
         sessions.set(sessionId, session);
-        console.log(`Created new session: ${sessionId}`);
+        addLog(`Created new session: ${sessionId}`);
       }
       
       const request = req.body;
@@ -238,7 +264,7 @@ app.all('/mcp', async (req, res) => {
         };
       } else if (request.method === 'tools/list') {
         // Return tools list directly with proper format
-        console.log('Returning tools list with', TOOLS_LIST.length, 'tools');
+        addLog(`Returning tools list with ${TOOLS_LIST.length} tools`);
         response = {
           jsonrpc: '2.0',
           id: request.id,
@@ -255,10 +281,11 @@ app.all('/mcp', async (req, res) => {
         };
       } else if (request.method && request.method.startsWith('notifications/')) {
         // Handle notifications - they don't require responses in JSON-RPC 2.0
-        console.log('Received notification:', request.method);
+        addLog(`Received notification: ${request.method}`);
         // Notifications don't have an id field and don't expect responses
         if (!request.id) {
           // Just acknowledge with 200 OK, no JSON-RPC response needed
+          addLog('Notification handled - no response needed');
           return res.status(200).end();
         }
         // If somehow it has an id (non-standard), acknowledge it
@@ -268,6 +295,7 @@ app.all('/mcp', async (req, res) => {
           result: {},
         };
       } else {
+        addLog(`Unknown method: ${request.method}`);
         response = {
           jsonrpc: '2.0',
           id: request.id,
@@ -278,7 +306,7 @@ app.all('/mcp', async (req, res) => {
         };
       }
       
-      console.log('Response:', JSON.stringify(response, null, 2));
+      addLog(`Response: ${JSON.stringify(response, null, 2)}`);
       
       res.writeHead(200, {
         'Content-Type': 'application/json',
@@ -290,6 +318,8 @@ app.all('/mcp', async (req, res) => {
       return res.end(JSON.stringify(response));
       
     } catch (error) {
+      addLog(`ERROR: ${error.message}`);
+      addLog(`ERROR STACK: ${error.stack}`);
       console.error('Error handling request:', error);
       return res.status(500).json({
         jsonrpc: '2.0',
@@ -309,7 +339,8 @@ app.all('/mcp', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Deribit MCP Server (Streamable HTTP) running on port ${PORT}`);
-  console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
-  console.log(`Available tools: ${TOOLS_LIST.length}`);
+  addLog(`Deribit MCP Server (Streamable HTTP) running on port ${PORT}`);
+  addLog(`MCP endpoint: http://localhost:${PORT}/mcp`);
+  addLog(`Available tools: ${TOOLS_LIST.length}`);
+  addLog(`Logs viewer: http://localhost:${PORT}/logs`);
 });
