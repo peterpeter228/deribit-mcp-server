@@ -253,6 +253,20 @@ app.all('/mcp', async (req, res) => {
           id: request.id,
           result,
         };
+      } else if (request.method && request.method.startsWith('notifications/')) {
+        // Handle notifications - they don't require responses in JSON-RPC 2.0
+        console.log('Received notification:', request.method);
+        // Notifications don't have an id field and don't expect responses
+        if (!request.id) {
+          // Just acknowledge with 200 OK, no JSON-RPC response needed
+          return res.status(200).end();
+        }
+        // If somehow it has an id (non-standard), acknowledge it
+        response = {
+          jsonrpc: '2.0',
+          id: request.id,
+          result: {},
+        };
       } else {
         response = {
           jsonrpc: '2.0',
