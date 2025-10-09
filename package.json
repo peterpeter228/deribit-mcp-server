@@ -1,39 +1,15 @@
 {
   "name": "deribit-mcp-server",
   "version": "1.0.0",
-  "description": "MCP server for Deribit cryptocurrency derivatives exchange API",
-  "main": "dist/index.js",
+  "description": "MCP server for Deribit cryptocurrency exchange API",
   "type": "module",
-  "bin": {
-    "deribit-mcp-server": "./dist/index.js"
-  },
+  "main": "mcp-sse-oauth-server.js",
   "scripts": {
-    "build": "tsc",
-    "watch": "tsc --watch",
-    "prepare": "npm run build",
     "start": "node mcp-sse-oauth-server.js"
   },
-  "keywords": [
-    "mcp",
-    "deribit",
-    "cryptocurrency",
-    "derivatives",
-    "options",
-    "futures"
-  ],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "bcryptjs": "^3.0.2",
-    "express": "^5.1.0",
-    "express-session": "^1.18.2",
-    "jsonwebtoken": "^9.0.2",
-    "node-fetch": "^3.3.2",
-    "sse": "^0.0.8"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.3.0"
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "express": "^4.21.2",
+    "node-fetch": "^3.3.2"
   }
 }

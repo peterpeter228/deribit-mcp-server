@@ -1,6 +1,6 @@
 import express from 'express';
-import crypto from 'crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -8,12 +8,27 @@ import {
 import fetch from 'node-fetch';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
+// Middleware
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// Log storage for debugging
+// CORS middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Accept, Cache-Control');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
+
+// Deribit API Configuration
+const DERIBIT_API_BASE = 'https://www.deribit.com/api/v2';
+
+// Logging
 const logs = [];
 const MAX_LOGS = 200;
 
@@ -25,25 +40,8 @@ function addLog(message) {
   console.log(message);
 }
 
-// Enable CORS
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Mcp-Session-Id');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-  next();
-});
-
-// Deribit API Configuration
-const DERIBIT_API_BASE = 'https://www.deribit.com/api/v2';
-
-// Session storage for connected clients
-const sessions = new Map();
-
-// Define tools array globally so we can use it in multiple places
-const TOOLS_LIST = [
+// Define Deribit tools
+const TOOLS = [
   {
     name: 'get_ticker',
     description: 'Get ticker data for a specific instrument including price, volume, and funding rate',
@@ -95,9 +93,9 @@ const TOOLS_LIST = [
   },
 ];
 
-// Create MCP Server instance
-function createMCPServer() {
-  const mcpServer = new Server(
+// Create MCP Server
+function createServer() {
+  const server = new Server(
     {
       name: 'deribit-mcp-server',
       version: '1.0.0',
@@ -109,12 +107,18 @@ function createMCPServer() {
     }
   );
 
-  mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
-    return { tools: TOOLS_LIST };
+  // List tools handler
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    addLog('Tools list requested');
+    return {
+      tools: TOOLS,
+    };
   });
 
-  mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // Call tool handler
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    addLog(`Tool called: ${name} with args: ${JSON.stringify(args)}`);
 
     try {
       let endpoint = '';
@@ -141,6 +145,7 @@ function createMCPServer() {
         }
       });
 
+      addLog(`Calling Deribit API: ${url.toString()}`);
       const response = await fetch(url.toString());
       const data = await response.json();
 
@@ -148,6 +153,7 @@ function createMCPServer() {
         throw new Error(data.error.message);
       }
 
+      addLog(`Tool ${name} executed successfully`);
       return {
         content: [
           {
@@ -157,6 +163,7 @@ function createMCPServer() {
         ],
       };
     } catch (error) {
+      addLog(`Tool ${name} error: ${error.message}`);
       return {
         content: [
           {
@@ -169,178 +176,91 @@ function createMCPServer() {
     }
   });
 
-  return mcpServer;
+  return server;
 }
 
-// Health check root
+// Health check endpoint
 app.get('/', (req, res) => {
-  addLog('GET / - Health check request');
+  addLog('Health check');
   res.json({
     status: 'ok',
     name: 'Deribit MCP Server',
     version: '1.0.0',
-    mcp_endpoint: '/mcp',
-    transport: 'streamable-http',
-    available_tools: TOOLS_LIST.length,
+    transport: 'sse',
+    available_tools: TOOLS.length,
   });
 });
 
-// Logs endpoint - view live logs in browser
+// Logs endpoint
 app.get('/logs', (req, res) => {
-  addLog('GET /logs - Logs viewer accessed');
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
-  
-  const logsText = logs.length > 0 
-    ? logs.join('\n\n') 
-    : 'No logs yet. Try connecting from Claude to generate logs.';
-  
+  const logsText = logs.length > 0 ? logs.join('\n\n') : 'No logs yet';
   res.send(`=== DERIBIT MCP SERVER LOGS ===\n\n${logsText}\n\n=== END OF LOGS ===`);
 });
 
-// Streamable HTTP MCP endpoint - handle both GET and POST
-app.all('/mcp', async (req, res) => {
-  const sessionId = req.headers['mcp-session-id'] || crypto.randomBytes(16).toString('hex');
+// SSE MCP endpoint
+app.get('/sse', async (req, res) => {
+  addLog('SSE connection initiated');
   
-  // Handle GET request - return server info
-  if (req.method === 'GET') {
-    addLog(`MCP GET request - Health check`);
-    return res.json({
-      status: 'ok',
-      name: 'deribit-mcp-server',
-      version: '1.0.0',
-      transport: 'streamable-http',
-      capabilities: {
-        tools: {},
-      },
-      available_tools: TOOLS_LIST.length,
-    });
-  }
+  const server = createServer();
+  const transport = new SSEServerTransport('/message', res);
   
-  // Handle POST request
-  if (req.method === 'POST') {
-    addLog(`MCP POST request - Session: ${sessionId}`);
-    addLog(`Request body: ${JSON.stringify(req.body, null, 2)}`);
-    
-    try {
-      const isInitialize = req.body?.method === 'initialize';
-      
-      let session = sessions.get(sessionId);
-      if (!session || isInitialize) {
-        const mcpServer = createMCPServer();
-        
-        const mockTransport = {
-          start: async () => {},
-          close: async () => {},
-          send: async (message) => {
-            addLog(`Server sending: ${JSON.stringify(message, null, 2)}`);
-          },
-        };
-        
-        await mcpServer.connect(mockTransport);
-        
-        session = { mcpServer, connected: true };
-        sessions.set(sessionId, session);
-        addLog(`Created new session: ${sessionId}`);
-      }
-      
-      const request = req.body;
-      let response;
-      
-      if (request.method === 'initialize') {
-        response = {
-          jsonrpc: '2.0',
-          id: request.id,
-          result: {
-            protocolVersion: '2025-06-18',  // ← UPDATED TO MATCH CLAUDE
-            capabilities: {
-              tools: {},
-            },
-            serverInfo: {
-              name: 'deribit-mcp-server',
-              version: '1.0.0',
-            },
-          },
-        };
-      } else if (request.method === 'tools/list') {
-        // Return tools list directly with proper format
-        addLog(`Returning tools list with ${TOOLS_LIST.length} tools`);
-        response = {
-          jsonrpc: '2.0',
-          id: request.id,
-          result: {
-            tools: TOOLS_LIST,
-          },
-        };
-      } else if (request.method === 'tools/call') {
-        const result = await session.mcpServer._requestHandlers.get('tools/call')(request);
-        response = {
-          jsonrpc: '2.0',
-          id: request.id,
-          result,
-        };
-      } else if (request.method && request.method.startsWith('notifications/')) {
-        // Handle notifications - they don't require responses in JSON-RPC 2.0
-        addLog(`Received notification: ${request.method}`);
-        // Notifications don't have an id field and don't expect responses
-        if (!request.id) {
-          // Just acknowledge with 200 OK, no JSON-RPC response needed
-          addLog('Notification handled - no response needed');
-          return res.status(200).end();
-        }
-        // If somehow it has an id (non-standard), acknowledge it
-        response = {
-          jsonrpc: '2.0',
-          id: request.id,
-          result: {},
-        };
-      } else {
-        addLog(`Unknown method: ${request.method}`);
-        response = {
-          jsonrpc: '2.0',
-          id: request.id,
-          error: {
-            code: -32601,
-            message: `Method not found: ${request.method}`,
-          },
-        };
-      }
-      
-      addLog(`Response: ${JSON.stringify(response, null, 2)}`);
-      
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'Mcp-Session-Id': sessionId,
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Expose-Headers': 'Mcp-Session-Id',
-      });
-      
-      return res.end(JSON.stringify(response));
-      
-    } catch (error) {
-      addLog(`ERROR: ${error.message}`);
-      addLog(`ERROR STACK: ${error.stack}`);
-      console.error('Error handling request:', error);
-      return res.status(500).json({
-        jsonrpc: '2.0',
-        id: req.body?.id,
-        error: {
-          code: -32603,
-          message: error.message,
-          data: {
-            errorDetails: error.stack,
-          },
-        },
-      });
-    }
-  }
+  await server.connect(transport);
   
-  return res.status(405).json({ error: 'Method not allowed' });
+  addLog('SSE transport connected');
 });
 
+// Message endpoint for SSE
+app.post('/message', async (req, res) => {
+  addLog(`Message received: ${JSON.stringify(req.body)}`);
+  // SSE transport handles this automatically
+  res.status(202).end();
+});
+
+// Main /mcp endpoint that handles SSE connection
+app.get('/mcp', async (req, res) => {
+  addLog('MCP SSE connection request');
+  
+  try {
+    // Set SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    });
+
+    const server = createServer();
+    const transport = new SSEServerTransport('/mcp/message', res);
+    
+    await server.connect(transport);
+    addLog('MCP server connected via SSE');
+
+    // Keep connection alive
+    req.on('close', () => {
+      addLog('SSE connection closed');
+    });
+
+  } catch (error) {
+    addLog(`SSE connection error: ${error.message}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// Message handler for SSE
+app.post('/mcp/message', express.text({ type: '*/*' }), async (req, res) => {
+  addLog(`MCP message received: ${req.body}`);
+  res.status(202).end();
+});
+
+// Start server
 app.listen(PORT, () => {
-  addLog(`Deribit MCP Server (Streamable HTTP) running on port ${PORT}`);
-  addLog(`MCP endpoint: http://localhost:${PORT}/mcp`);
-  addLog(`Available tools: ${TOOLS_LIST.length}`);
-  addLog(`Logs viewer: http://localhost:${PORT}/logs`);
+  addLog(`Deribit MCP Server running on port ${PORT}`);
+  addLog(`Health: http://localhost:${PORT}/`);
+  addLog(`MCP SSE endpoint: http://localhost:${PORT}/mcp`);
+  addLog(`Logs: http://localhost:${PORT}/logs`);
+  addLog(`Available tools: ${TOOLS.length}`);
 });
