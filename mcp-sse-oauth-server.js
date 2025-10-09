@@ -199,38 +199,12 @@ app.get('/logs', (req, res) => {
   res.send(`=== DERIBIT MCP SERVER LOGS ===\n\n${logsText}\n\n=== END OF LOGS ===`);
 });
 
-// SSE MCP endpoint
-app.get('/sse', async (req, res) => {
-  addLog('SSE connection initiated');
-  
-  const server = createServer();
-  const transport = new SSEServerTransport('/message', res);
-  
-  await server.connect(transport);
-  
-  addLog('SSE transport connected');
-});
-
-// Message endpoint for SSE
-app.post('/message', async (req, res) => {
-  addLog(`Message received: ${JSON.stringify(req.body)}`);
-  // SSE transport handles this automatically
-  res.status(202).end();
-});
-
 // Main /mcp endpoint that handles SSE connection
 app.get('/mcp', async (req, res) => {
   addLog('MCP SSE connection request');
   
   try {
-    // Set SSE headers
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-    });
-
+    // Let SSEServerTransport handle all headers - don't set them manually
     const server = createServer();
     const transport = new SSEServerTransport('/mcp/message', res);
     
@@ -244,6 +218,7 @@ app.get('/mcp', async (req, res) => {
 
   } catch (error) {
     addLog(`SSE connection error: ${error.message}`);
+    console.error('SSE Error:', error);
     if (!res.headersSent) {
       res.status(500).json({ error: error.message });
     }
