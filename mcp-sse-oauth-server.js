@@ -30,6 +30,59 @@ const DERIBIT_API_BASE = 'https://www.deribit.com/api/v2';
 // Session storage for connected clients
 const sessions = new Map();
 
+// Define tools array globally so we can use it in multiple places
+const TOOLS_LIST = [
+  {
+    name: 'get_ticker',
+    description: 'Get ticker data for a specific instrument including price, volume, and funding rate',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instrument_name: {
+          type: 'string',
+          description: 'Instrument name (e.g., BTC-PERPETUAL, ETH-PERPETUAL)',
+        },
+      },
+      required: ['instrument_name'],
+    },
+  },
+  {
+    name: 'get_instruments',
+    description: 'Get all available trading instruments on Deribit',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        currency: {
+          type: 'string',
+          description: 'Currency symbol (BTC, ETH, USDC, USDT, EURR)',
+        },
+        kind: {
+          type: 'string',
+          description: 'Instrument kind (future, option, spot)',
+        },
+      },
+    },
+  },
+  {
+    name: 'get_orderbook',
+    description: 'Get order book data for an instrument',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instrument_name: {
+          type: 'string',
+          description: 'Instrument name',
+        },
+        depth: {
+          type: 'number',
+          description: 'Order book depth',
+        },
+      },
+      required: ['instrument_name'],
+    },
+  },
+];
+
 // Create MCP Server instance
 function createMCPServer() {
   const mcpServer = new Server(
@@ -44,60 +97,8 @@ function createMCPServer() {
     }
   );
 
-  const tools = [
-    {
-      name: 'get_ticker',
-      description: 'Get ticker data for a specific instrument including price, volume, and funding rate',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          instrument_name: {
-            type: 'string',
-            description: 'Instrument name (e.g., BTC-PERPETUAL, ETH-PERPETUAL)',
-          },
-        },
-        required: ['instrument_name'],
-      },
-    },
-    {
-      name: 'get_instruments',
-      description: 'Get all available trading instruments on Deribit',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          currency: {
-            type: 'string',
-            description: 'Currency symbol (BTC, ETH, USDC, USDT, EURR)',
-          },
-          kind: {
-            type: 'string',
-            description: 'Instrument kind (future, option, spot)',
-          },
-        },
-      },
-    },
-    {
-      name: 'get_orderbook',
-      description: 'Get order book data for an instrument',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          instrument_name: {
-            type: 'string',
-            description: 'Instrument name',
-          },
-          depth: {
-            type: 'number',
-            description: 'Order book depth',
-          },
-        },
-        required: ['instrument_name'],
-      },
-    },
-  ];
-
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
-    return { tools };
+    return { tools: TOOLS_LIST };
   });
 
   mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -167,6 +168,7 @@ app.get('/', (req, res) => {
     version: '1.0.0',
     mcp_endpoint: '/mcp',
     transport: 'streamable-http',
+    available_tools: TOOLS_LIST.length,
   });
 });
 
@@ -185,6 +187,7 @@ app.all('/mcp', async (req, res) => {
       capabilities: {
         tools: {},
       },
+      available_tools: TOOLS_LIST.length,
     });
   }
   
@@ -234,11 +237,14 @@ app.all('/mcp', async (req, res) => {
           },
         };
       } else if (request.method === 'tools/list') {
-        const result = await session.mcpServer._requestHandlers.get('tools/list')();
+        // Return tools list directly with proper format
+        console.log('Returning tools list with', TOOLS_LIST.length, 'tools');
         response = {
           jsonrpc: '2.0',
           id: request.id,
-          result,
+          result: {
+            tools: TOOLS_LIST,
+          },
         };
       } else if (request.method === 'tools/call') {
         const result = await session.mcpServer._requestHandlers.get('tools/call')(request);
@@ -277,6 +283,9 @@ app.all('/mcp', async (req, res) => {
         error: {
           code: -32603,
           message: error.message,
+          data: {
+            errorDetails: error.stack,
+          },
         },
       });
     }
@@ -288,4 +297,5 @@ app.all('/mcp', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Deribit MCP Server (Streamable HTTP) running on port ${PORT}`);
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
+  console.log(`Available tools: ${TOOLS_LIST.length}`);
 });
