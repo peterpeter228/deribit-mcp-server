@@ -12,7 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlenmcoded({ extended: true }));
 
 // Deribit API Configuration
 const DERIBIT_API_BASE = 'https://www.deribit.com/api/v2';
@@ -353,6 +353,25 @@ function createMCPServer() {
   return mcpServer;
 }
 
+// Public SSE endpoint (no authentication required) - FOR TESTING
+app.get('/sse-public', async (req, res) => {
+  console.log('New public SSE connection (no auth)');
+  
+  const mcpServer = createMCPServer();
+  const transport = new SSEServerTransport('/message-public', res);
+  
+  await mcpServer.connect(transport);
+  
+  req.on('close', () => {
+    console.log('Public SSE connection closed');
+  });
+});
+
+// Public message endpoint (no authentication required) - FOR TESTING
+app.post('/message-public', async (req, res) => {
+  res.status(200).end();
+});
+
 // SSE endpoint (protected by OAuth)
 app.get('/sse', validateToken, async (req, res) => {
   console.log(`New SSE connection from client: ${req.client_id}`);
@@ -379,6 +398,7 @@ app.get('/', (req, res) => {
     name: 'Deribit MCP Server with OAuth',
     version: '1.0.0',
     mcp_endpoint: '/sse',
+    mcp_public_endpoint: '/sse-public',
     oauth_discovery: '/.well-known/oauth-authorization-server',
     supports_dcr: true,
   });
@@ -387,5 +407,6 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Deribit MCP Server (SSE + OAuth) running on port ${PORT}`);
   console.log(`OAuth discovery: http://localhost:${PORT}/.well-known/oauth-authorization-server`);
-  console.log(`MCP SSE endpoint: http://localhost:${PORT}/sse`);
+  console.log(`MCP SSE endpoint (OAuth): http://localhost:${PORT}/sse`);
+  console.log(`MCP SSE endpoint (Public): http://localhost:${PORT}/sse-public`);
 });
