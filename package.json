@@ -5,7 +5,8 @@
   "type": "module",
   "main": "mcp-sse-oauth-server.js",
   "scripts": {
-    "start": "node mcp-sse-oauth-server.js"
+    "start": "node mcp-sse-oauth-server.js",
+    "build": "echo 'No build step required'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
