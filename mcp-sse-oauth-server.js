@@ -14,11 +14,11 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Enable CORS for all routes
+// Enable CORS
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Mcp-Session-Id');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
@@ -27,6 +27,9 @@ app.use((req, res, next) => {
 
 // Deribit API Configuration
 const DERIBIT_API_BASE = 'https://www.deribit.com/api/v2';
+
+// Session storage
+const sessions = new Map();
 
 // Create MCP Server
 function createMCPServer() {
@@ -157,41 +160,76 @@ function createMCPServer() {
   return mcpServer;
 }
 
-// Public SSE endpoint - CORRECT MCP SSE Implementation
-app.get('/sse-public', async (req, res) => {
-  console.log('New public SSE connection - MCP protocol');
+// Streamable HTTP MCP endpoint (modern standard)
+app.all('/mcp', async (req, res) => {
+  const sessionId = req.headers['mcp-session-id'] || crypto.randomBytes(16).toString('hex');
   
-  // Set SSE headers
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-  });
-
-  // CRITICAL: Send endpoint event first (required by MCP SSE spec)
-  const sessionId = crypto.randomBytes(16).toString('hex');
-  const messageEndpoint = `/message-public?sessionId=${sessionId}`;
+  // Handle POST - Client sending requests
+  if (req.method === 'POST') {
+    console.log(`MCP POST request - Session: ${sessionId}`);
+    
+    const isInitialize = req.body?.method === 'initialize';
+    
+    // Get or create session
+    let session = sessions.get(sessionId);
+    if (!session || isInitialize) {
+      const mcpServer = createMCPServer();
+      session = { mcpServer, responses: [] };
+      sessions.set(sessionId, session);
+      console.log(`Created new session: ${sessionId}`);
+    }
+    
+    // Set headers
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Mcp-Session-Id': sessionId,
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'Mcp-Session-Id',
+    });
+    
+    // Process the request
+    try {
+      const response = await session.mcpServer.handleRequest(req.body);
+      res.end(JSON.stringify(response));
+    } catch (error) {
+      console.error('Error handling request:', error);
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: req.body?.id,
+        error: {
+          code: -32603,
+          message: error.message,
+        },
+      }));
+    }
+    return;
+  }
   
-  res.write(`event: endpoint\n`);
-  res.write(`data: ${messageEndpoint}\n\n`);
-  console.log(`Sent endpoint event: ${messageEndpoint}`);
+  // Handle GET - Optional SSE stream for notifications
+  if (req.method === 'GET') {
+    console.log(`MCP GET request (SSE) - Session: ${sessionId}`);
+    
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    });
+    
+    // Keep connection alive
+    const keepAliveInterval = setInterval(() => {
+      res.write(':keepalive\n\n');
+    }, 30000);
+    
+    req.on('close', () => {
+      clearInterval(keepAliveInterval);
+      console.log(`SSE connection closed for session: ${sessionId}`);
+    });
+    
+    return;
+  }
   
-  // Create MCP server for this session
-  const mcpServer = createMCPServer();
-  const transport = new SSEServerTransport(messageEndpoint, res);
-  
-  await mcpServer.connect(transport);
-  
-  req.on('close', () => {
-    console.log('Public SSE connection closed');
-  });
-});
-
-// Public message endpoint
-app.post('/message-public', async (req, res) => {
-  console.log('Received message on /message-public:', req.body);
-  res.status(200).end();
+  res.status(405).json({ error: 'Method not allowed' });
 });
 
 // Health check
@@ -200,12 +238,13 @@ app.get('/', (req, res) => {
     status: 'ok',
     name: 'Deribit MCP Server',
     version: '1.0.0',
-    mcp_endpoint: '/sse-public',
-    transport: 'sse',
+    mcp_endpoint: '/mcp',
+    transport: 'streamable-http',
+    supports_sse_notifications: true,
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`Deribit MCP Server running on port ${PORT}`);
-  console.log(`MCP SSE endpoint: http://localhost:${PORT}/sse-public`);
+  console.log(`Deribit MCP Server (Streamable HTTP) running on port ${PORT}`);
+  console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
 });
