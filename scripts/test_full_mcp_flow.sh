@@ -17,9 +17,12 @@ echo ""
 echo "2. Connecting to SSE endpoint..."
 SSE_OUTPUT=$(timeout 3 curl -s -N -H "Accept: text/event-stream" "$BASE_URL/sse" 2>&1 | head -10) || true
 
-# Extract session_id from headers (more robust parsing)
-# Use a background curl to get headers while connecting
-SESSION_ID=$(curl -s -N -H "Accept: text/event-stream" "$BASE_URL/sse" 2>&1 | head -1 & sleep 1 && curl -s -I "$BASE_URL/sse" 2>/dev/null | grep -i "X-Session-Id" | sed -E 's/.*[Xx]-[Ss]ession-[Ii][Dd][[:space:]]*:[[:space:]]*([a-f0-9-]{36}).*/\1/i' | head -1)
+# Extract session_id from GET response headers.
+# NOTE: Do NOT use HEAD /sse: it may not create/retain a valid session.
+SESSION_ID=$(
+  timeout 2 bash -c \
+    "curl -s -D - -o /dev/null -H \"Accept: text/event-stream\" \"$BASE_URL/sse\" | grep -iE \"^(Mcp-Session-Id|X-Session-Id):\" | head -1 | sed -E 's/^[^:]+:[[:space:]]*([a-f0-9-]{36}).*/\\1/i'"
+) || true
 
 if [ -z "$SESSION_ID" ]; then
     echo "ERROR: Could not get session_id from headers"
@@ -34,9 +37,8 @@ echo ""
 echo "3. Sending initialize request..."
 INIT_RESPONSE=$(curl -s -X POST "$BASE_URL/mcp/message" \
     -H "Content-Type: application/json" \
-    -H "X-Session-Id: $SESSION_ID" \
+    -H "Mcp-Session-Id: $SESSION_ID" \
     -d "{
-        \"session_id\": \"$SESSION_ID\",
         \"jsonrpc\": \"2.0\",
         \"id\": 1,
         \"method\": \"initialize\",
@@ -58,9 +60,8 @@ echo ""
 echo "4. Testing tools/list..."
 TOOLS_RESPONSE=$(curl -s -X POST "$BASE_URL/mcp/message" \
     -H "Content-Type: application/json" \
-    -H "X-Session-Id: $SESSION_ID" \
+    -H "Mcp-Session-Id: $SESSION_ID" \
     -d "{
-        \"session_id\": \"$SESSION_ID\",
         \"jsonrpc\": \"2.0\",
         \"id\": 2,
         \"method\": \"tools/list\",
