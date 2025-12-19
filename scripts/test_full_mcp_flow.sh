@@ -17,8 +17,9 @@ echo ""
 echo "2. Connecting to SSE endpoint..."
 SSE_OUTPUT=$(timeout 3 curl -s -N -H "Accept: text/event-stream" "$BASE_URL/sse" 2>&1 | head -10) || true
 
-# Extract session_id from headers
-SESSION_ID=$(curl -s -I "$BASE_URL/sse" 2>/dev/null | grep -i "X-Session-Id" | cut -d' ' -f2 | tr -d '\r\n' | head -1)
+# Extract session_id from headers (more robust parsing)
+# Use a background curl to get headers while connecting
+SESSION_ID=$(curl -s -N -H "Accept: text/event-stream" "$BASE_URL/sse" 2>&1 | head -1 & sleep 1 && curl -s -I "$BASE_URL/sse" 2>/dev/null | grep -i "X-Session-Id" | sed -E 's/.*[Xx]-[Ss]ession-[Ii][Dd][[:space:]]*:[[:space:]]*([a-f0-9-]{36}).*/\1/i' | head -1)
 
 if [ -z "$SESSION_ID" ]; then
     echo "ERROR: Could not get session_id from headers"

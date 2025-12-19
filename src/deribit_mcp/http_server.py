@@ -352,20 +352,33 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
             # 4. Client sends initialize request via POST to /mcp/message
             # 5. Server responds via SSE stream
             
-            # Send a simple connection notification with session_id
-            # This helps clients that need to know the session_id before sending requests
-            # Format: SSE comment (doesn't interfere with MCP protocol)
+            # MCP SSE Protocol:
+            # According to MCP spec, server should NOT send initial messages
+            # Client connects, gets session_id from X-Session-Id header,
+            # then sends initialize request via POST to /mcp/message
+            # Server responds via SSE stream
+            
+            # However, some clients may need a connection confirmation
+            # Send a minimal message event (not a comment) to indicate connection is ready
+            # This uses the standard "message" event type with a notification
+            
+            # Send connection ready notification (optional, helps some clients)
             try:
-                # Send session_id as comment so client can extract it if needed
-                # This is non-blocking and doesn't interfere with MCP protocol
-                yield {
-                    "event": "comment",
-                    "data": f"session_id:{session_id}",
+                ready_notification = {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                    "params": {
+                        "session_id": session_id,
+                    },
                 }
-                logger.info(f"SSE session {session_id} ready (client: {client_ip})")
+                yield {
+                    "event": "message",
+                    "data": _compact_json(ready_notification),
+                }
+                logger.info(f"SSE session {session_id} connection ready notification sent (client: {client_ip})")
             except Exception as e:
-                logger.warning(f"Error sending session comment: {e}")
-                # Continue anyway - session_id is in header
+                logger.warning(f"Error sending ready notification: {e}")
+                # Continue anyway - session_id is in header, connection is still valid
             
             # Now wait for client to send initialize request
             logger.debug(f"Waiting for initialize request for session {session_id}")
@@ -502,12 +515,23 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
         )
     
     if session_id not in _sessions:
-        logger.warning(f"Invalid session_id: {session_id} (available sessions: {list(_sessions.keys())[:3]})")
+        available_sessions = list(_sessions.keys())
+        logger.warning(
+            f"Invalid session_id: {session_id[:8]}... "
+            f"(available: {len(available_sessions)} sessions, "
+            f"recent: {available_sessions[-3:] if available_sessions else 'none'})"
+        )
+        # Check if session might have just expired
+        if available_sessions:
+            logger.info(f"Most recent session: {available_sessions[-1]}")
         return JSONResponse(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "error": {"code": -32602, "message": f"Invalid or expired session_id: {session_id}"},
+                "error": {
+                    "code": -32602,
+                    "message": f"Invalid or expired session_id. Available sessions: {len(available_sessions)}",
+                },
             },
             status_code=400,
         )
@@ -571,15 +595,31 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
             return JSONResponse(error_response)
 
         try:
+            logger.info(f"Executing tool: {tool_name} for session {session_id[:8]}...")
             result = await _dispatch_tool(tool_name, arguments)
+            
+            # MCP tools/call response format
             response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "result": {
-                    "content": [{"type": "text", "text": _compact_json(result)}],
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": _compact_json(result),
+                        }
+                    ],
                 },
             }
+            
+            # Send via SSE FIRST (client is waiting for this)
             await session.send("response", response)
+            logger.info(f"Tool {tool_name} response sent via SSE for session {session_id[:8]}...")
+            
+            # Small delay to ensure SSE message is sent
+            await asyncio.sleep(0.05)
+            
+            # Also return HTTP response
             return JSONResponse(response)
         except Exception as e:
             error_response = {
