@@ -17,6 +17,10 @@ services:
 
     container_name: deribit-mcp-server
 
+    # Load environment variables from .env file if it exists
+    env_file:
+      - .env
+
     ports:
       - "${DERIBIT_PORT:-8005}:8000"
 

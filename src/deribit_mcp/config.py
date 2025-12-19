@@ -30,7 +30,9 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="DERIBIT_",
-        env_file=".env",
+        # Don't auto-load .env file to avoid getcwd issues in Docker
+        # Use environment variables directly or docker-compose env_file instead
+        env_file=None,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -142,6 +144,9 @@ def get_settings() -> Settings:
     Get cached settings instance.
 
     Uses lru_cache to ensure single instance across the application.
+    
+    Note: In Docker, configuration should be passed via environment variables
+    or docker-compose env_file directive, not via .env file.
     """
     return Settings()
 
