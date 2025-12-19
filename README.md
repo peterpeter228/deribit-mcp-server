@@ -423,6 +423,162 @@ deribit-mcp-server/
 
 ## 🔄 部署
 
+### Ubuntu 服务器部署（推荐，带自动重启）
+
+提供完整的安装脚本，支持 systemd 服务管理、自动重启和日志轮转。
+
+#### 一键安装
+
+```bash
+# 克隆项目
+git clone https://github.com/your-repo/deribit-mcp-server.git
+cd deribit-mcp-server
+
+# 运行安装脚本（需要 sudo）
+sudo bash scripts/install.sh
+```
+
+#### 安装脚本功能
+
+- ✅ 自动安装 Python 3.11+ 和依赖
+- ✅ 创建专用系统用户（安全隔离）
+- ✅ 配置 systemd 服务（后台运行）
+- ✅ 自动重启（崩溃后 5 秒内重启）
+- ✅ 日志轮转（保留 14 天）
+- ✅ 资源限制（内存 512MB）
+
+#### 安装后的目录结构
+
+```
+/opt/deribit-mcp/          # 应用目录
+├── src/                   # 源代码
+├── venv/                  # Python 虚拟环境
+└── pyproject.toml
+
+/etc/deribit-mcp/          # 配置目录
+└── config.env             # 配置文件（编辑此文件）
+
+/var/log/deribit-mcp/      # 日志目录
+```
+
+#### 服务管理命令
+
+```bash
+# 查看服务状态
+sudo systemctl status deribit-mcp
+
+# 查看实时日志
+sudo journalctl -u deribit-mcp -f
+
+# 重启服务
+sudo systemctl restart deribit-mcp
+
+# 停止服务
+sudo systemctl stop deribit-mcp
+
+# 启动服务
+sudo systemctl start deribit-mcp
+
+# 禁用开机自启
+sudo systemctl disable deribit-mcp
+```
+
+#### 配置文件编辑
+
+```bash
+# 编辑配置
+sudo nano /etc/deribit-mcp/config.env
+
+# 修改后重启服务
+sudo systemctl restart deribit-mcp
+```
+
+配置文件内容：
+
+```bash
+# 环境选择: prod 或 test
+DERIBIT_ENV=prod
+
+# Private API 开关
+DERIBIT_ENABLE_PRIVATE=false
+
+# API 凭证（替换为真实值）
+DERIBIT_CLIENT_ID=YOUR_CLIENT_ID
+DERIBIT_CLIENT_SECRET=YOUR_CLIENT_SECRET
+
+# HTTP 服务器
+DERIBIT_HOST=0.0.0.0
+DERIBIT_PORT=8000
+```
+
+#### 健康检查与自动恢复
+
+设置定时健康检查（可选）：
+
+```bash
+# 编辑 crontab
+sudo crontab -e
+
+# 添加以下行（每 5 分钟检查一次）
+*/5 * * * * /opt/deribit-mcp/scripts/healthcheck.sh >> /var/log/deribit-mcp/healthcheck.log 2>&1
+```
+
+#### 更新应用
+
+```bash
+# 进入项目目录
+cd /path/to/deribit-mcp-server
+git pull
+
+# 运行更新脚本
+sudo bash scripts/update.sh
+```
+
+#### 卸载
+
+```bash
+sudo bash scripts/uninstall.sh
+```
+
+#### systemd 服务配置详解
+
+服务文件位于 `/etc/systemd/system/deribit-mcp.service`：
+
+```ini
+[Unit]
+Description=Deribit MCP Server (HTTP/SSE)
+After=network-online.target
+
+[Service]
+Type=simple
+User=deribit
+Group=deribit
+
+# 环境配置文件
+EnvironmentFile=/etc/deribit-mcp/config.env
+
+# 启动命令
+ExecStart=/opt/deribit-mcp/venv/bin/python -m deribit_mcp.http_server
+
+# 自动重启配置
+Restart=always           # 总是重启
+RestartSec=5            # 重启间隔 5 秒
+StartLimitIntervalSec=60 # 60 秒内
+StartLimitBurst=3        # 最多重启 3 次
+
+# 资源限制
+MemoryMax=512M
+CPUQuota=100%
+
+# 安全加固
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ### Docker 部署
 
 ```dockerfile
