@@ -26,6 +26,7 @@ import logging
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import uvicorn
 from sse_starlette.sse import EventSourceResponse
@@ -63,13 +64,24 @@ def _compact_json(data: dict) -> str:
 class SSESession:
     """Manages an SSE session with message queue."""
 
+    # Heartbeat interval (seconds)
+    HEARTBEAT_INTERVAL = 30.0
+    # Connection timeout (seconds) - close if no activity
+    CONNECTION_TIMEOUT = 300.0  # 5 minutes
+
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.queue: asyncio.Queue = asyncio.Queue()
         self.created_at = asyncio.get_event_loop().time()
+        self.last_activity = asyncio.get_event_loop().time()
+        self._closed = False
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def send(self, event: str, data: dict):
         """Send an event to the client."""
+        if self._closed:
+            return
+        self.last_activity = asyncio.get_event_loop().time()
         await self.queue.put(
             {
                 "event": event,
@@ -79,11 +91,71 @@ class SSESession:
 
     async def close(self):
         """Close the session."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
         await self.queue.put(None)
+
+    def mark_activity(self):
+        """Mark that there was activity on this session."""
+        self.last_activity = asyncio.get_event_loop().time()
+
+    def is_timed_out(self) -> bool:
+        """Check if session has timed out."""
+        if self._closed:
+            return True
+        elapsed = asyncio.get_event_loop().time() - self.last_activity
+        return elapsed > self.CONNECTION_TIMEOUT
 
 
 # Global session storage
 _sessions: dict[str, SSESession] = {}
+_shutdown_event: Optional[asyncio.Event] = None
+
+
+async def _cleanup_stale_sessions():
+    """Periodically clean up stale/timed out sessions."""
+    while True:
+        try:
+            await asyncio.sleep(60)  # Check every minute
+            if _shutdown_event and _shutdown_event.is_set():
+                break
+
+            now = asyncio.get_event_loop().time()
+            timed_out_sessions = [
+                session_id
+                for session_id, session in list(_sessions.items())
+                if session.is_timed_out()
+            ]
+
+            for session_id in timed_out_sessions:
+                logger.info(f"Cleaning up timed out SSE session: {session_id}")
+                session = _sessions.get(session_id)
+                if session:
+                    await session.close()
+                if session_id in _sessions:
+                    del _sessions[session_id]
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in cleanup task: {e}")
+
+
+async def _send_heartbeat(session: SSESession):
+    """Send periodic heartbeat to keep connection alive."""
+    try:
+        while not session._closed:
+            await asyncio.sleep(session.HEARTBEAT_INTERVAL)
+            if session._closed or session.is_timed_out():
+                break
+            await session.send("ping", {"timestamp": asyncio.get_event_loop().time()})
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.debug(f"Heartbeat error for session {session.session_id}: {e}")
 
 
 # =============================================================================
@@ -181,6 +253,9 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
 
     logger.info(f"SSE session created: {session_id}")
 
+    # Start heartbeat task
+    session._heartbeat_task = asyncio.create_task(_send_heartbeat(session))
+
     async def event_generator():
         # Send session initialization
         yield {
@@ -195,13 +270,38 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
         }
 
         try:
-            while True:
-                message = await session.queue.get()
-                if message is None:
+            # Use asyncio.wait_for to detect client disconnection
+            while not session._closed:
+                # Check if client disconnected (is_disconnected is a property, not a coroutine)
+                if request.is_disconnected:
+                    logger.info(f"Client disconnected for SSE session {session_id}")
                     break
-                yield message
+
+                try:
+                    # Wait for message with timeout to detect disconnections
+                    message = await asyncio.wait_for(
+                        session.queue.get(), timeout=session.HEARTBEAT_INTERVAL + 5
+                    )
+                    if message is None:
+                        break
+                    yield message
+                except asyncio.TimeoutError:
+                    # Check if client disconnected during timeout
+                    if request.is_disconnected:
+                        logger.info(f"Client disconnected for SSE session {session_id}")
+                        break
+                    # Check if session timed out or should be closed
+                    if session.is_timed_out():
+                        logger.info(f"SSE session {session_id} timed out")
+                        break
+                    # Continue waiting if not timed out
+                    continue
+                except Exception as e:
+                    logger.debug(f"Error in event generator for {session_id}: {e}")
+                    break
         finally:
             # Cleanup session
+            await session.close()
             if session_id in _sessions:
                 del _sessions[session_id]
             logger.info(f"SSE session closed: {session_id}")
@@ -244,6 +344,16 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
         )
 
     session = _sessions[session_id]
+    
+    # Mark activity to prevent timeout
+    session.mark_activity()
+    
+    # Check if session is closed or timed out
+    if session._closed or session.is_timed_out():
+        return JSONResponse(
+            {"error": True, "code": 400, "message": "Session expired or closed"},
+            status_code=400,
+        )
 
     # Handle MCP methods
     if method == "tools/list":
@@ -361,15 +471,46 @@ async def close_session_endpoint(request: Request) -> JSONResponse:
 @asynccontextmanager
 async def lifespan(app: Starlette):
     """Application lifespan handler."""
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
+    
     settings = get_settings()
     logger.info("Starting Deribit MCP HTTP Server")
     logger.info(f"Configuration: {settings.get_safe_config_summary()}")
 
-    yield
+    # Start cleanup task
+    cleanup_task = asyncio.create_task(_cleanup_stale_sessions())
 
-    # Cleanup
-    await shutdown_client()
-    logger.info("Server shutdown complete")
+    try:
+        yield
+    finally:
+        # Signal shutdown
+        _shutdown_event.set()
+        
+        # Cancel cleanup task
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+
+        # Close all active SSE sessions
+        logger.info(f"Closing {len(_sessions)} active SSE sessions...")
+        close_tasks = [session.close() for session in _sessions.values()]
+        if close_tasks:
+            try:
+                # Wait up to 5 seconds for sessions to close gracefully
+                await asyncio.wait_for(
+                    asyncio.gather(*close_tasks, return_exceptions=True),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Some SSE sessions did not close within timeout")
+        _sessions.clear()
+
+        # Cleanup client
+        await shutdown_client()
+        logger.info("Server shutdown complete")
 
 
 # Define routes
