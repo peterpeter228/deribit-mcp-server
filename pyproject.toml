@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deribit-mcp-server"
+version = "1.0.0"
+description = "LLM-friendly Deribit MCP Server for derivatives data - compact JSON outputs for trading systems"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Deribit MCP Dev", email = "dev@example.com" }
+]
+keywords = ["deribit", "mcp", "trading", "options", "derivatives", "volatility"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+dependencies = [
+    "mcp>=1.0.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.38.0",
+    "sse-starlette>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "respx>=0.21.0",
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+]
+websocket = [
+    "websockets>=12.0",
+]
+
+[project.scripts]
+deribit-mcp = "deribit_mcp.server:main"
+deribit-mcp-http = "deribit_mcp.http_server:main"
+
+[project.urls]
+Homepage = "https://github.com/example/deribit-mcp-server"
+Documentation = "https://github.com/example/deribit-mcp-server#readme"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deribit_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true

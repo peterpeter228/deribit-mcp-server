@@ -1,0 +1,95 @@
+# Docker Compose for Deribit MCP Server
+# =============================================================================
+# 用法:
+#   docker-compose up -d        # 后台启动
+#   docker-compose logs -f      # 查看日志
+#   docker-compose down         # 停止
+#   docker-compose restart      # 重启
+# =============================================================================
+
+version: "3.8"
+
+services:
+  deribit-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: deribit-mcp-server
+
+    ports:
+      - "${DERIBIT_PORT:-8000}:8000"
+
+    environment:
+      # 环境选择
+      - DERIBIT_ENV=${DERIBIT_ENV:-prod}
+
+      # Private API (默认禁用)
+      - DERIBIT_ENABLE_PRIVATE=${DERIBIT_ENABLE_PRIVATE:-false}
+
+      # API 凭证 (仅 ENABLE_PRIVATE=true 时需要)
+      - DERIBIT_CLIENT_ID=${DERIBIT_CLIENT_ID:-}
+      - DERIBIT_CLIENT_SECRET=${DERIBIT_CLIENT_SECRET:-}
+
+      # 网络设置
+      - DERIBIT_TIMEOUT_S=${DERIBIT_TIMEOUT_S:-10}
+      - DERIBIT_MAX_RPS=${DERIBIT_MAX_RPS:-8}
+
+      # 缓存设置
+      - DERIBIT_CACHE_TTL_FAST=${DERIBIT_CACHE_TTL_FAST:-1.0}
+      - DERIBIT_CACHE_TTL_SLOW=${DERIBIT_CACHE_TTL_SLOW:-30.0}
+
+      # 安全设置
+      - DERIBIT_DRY_RUN=${DERIBIT_DRY_RUN:-true}
+
+      # 服务器设置
+      - DERIBIT_HOST=0.0.0.0
+      - DERIBIT_PORT=8000
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # 重启策略
+    restart: unless-stopped
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+    # 日志配置
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# =============================================================================
+# 使用说明:
+# 
+# 1. 创建 .env 文件 (从 .env.example 复制):
+#    cp .env.example .env
+#    nano .env
+#
+# 2. 启动服务:
+#    docker-compose up -d
+#
+# 3. 查看日志:
+#    docker-compose logs -f
+#
+# 4. 健康检查:
+#    curl http://localhost:8000/health
+#
+# 5. 停止服务:
+#    docker-compose down
+# =============================================================================
