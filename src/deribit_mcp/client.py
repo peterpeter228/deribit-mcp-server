@@ -260,9 +260,11 @@ class DeribitJsonRpcClient:
             headers["Authorization"] = f"Bearer {access_token}"
 
         try:
-            # Deribit JSON-RPC: POST directly to base URL
+            # Deribit JSON-RPC: POST to base URL with method in body
+            # Example: POST https://www.deribit.com/api/v2
+            #          Body: {"jsonrpc":"2.0","id":1,"method":"public/get_time","params":{}}
             response = await self.http_client.post(
-                "",  # POST to base URL (https://www.deribit.com/api/v2)
+                "",  # Empty path = POST to base_url directly
                 json=payload,
                 headers=headers,
             )
