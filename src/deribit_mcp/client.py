@@ -260,8 +260,9 @@ class DeribitJsonRpcClient:
             headers["Authorization"] = f"Bearer {access_token}"
 
         try:
+            # Deribit JSON-RPC: POST directly to base URL
             response = await self.http_client.post(
-                "/public/json_rpc" if method.startswith("public/") else "/private/json_rpc",
+                "",  # POST to base URL (https://www.deribit.com/api/v2)
                 json=payload,
                 headers=headers,
             )
