@@ -481,21 +481,51 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
     Handle MCP messages via HTTP POST.
 
     Expects JSON body with:
-    - session_id: SSE session ID (from X-Session-Id header or body)
-    - method: MCP method name
-    - params: Method parameters
+    - method: MCP method name (required)
+    - params: Method parameters (optional)
     - id: Request ID (optional, defaults to 1)
+    
+    Session ID should be provided via X-Session-Id header (preferred) or in body.
     """
+    # Parse request body
     try:
         body = await request.json()
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in request body: {e}")
         return JSONResponse(
-            {"error": True, "code": 400, "message": "Invalid JSON"},
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32700, "message": f"Parse error: Invalid JSON - {str(e)[:100]}"},
+            },
+            status_code=400,
+        )
+    except Exception as e:
+        logger.error(f"Error parsing request body: {e}", exc_info=True)
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32600, "message": f"Invalid Request: {str(e)[:100]}"},
+            },
+            status_code=400,
+        )
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32600, "message": "Invalid Request: Body must be a JSON object"},
+            },
             status_code=400,
         )
 
     # Try to get session_id from header first, then body
-    session_id = request.headers.get("X-Session-Id") or body.get("session_id")
+    session_id = request.headers.get("X-Session-Id")
+    if not session_id:
+        session_id = body.get("session_id")
+    
     method = body.get("method")
     params = body.get("params", {})
     request_id = body.get("id")
@@ -504,12 +534,23 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
     if request_id is None:
         request_id = 1
 
+    # Validate required fields
+    if not method:
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32600, "message": "Invalid Request: Missing 'method' field"},
+            },
+            status_code=400,
+        )
+
     if not session_id:
         return JSONResponse(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "error": {"code": -32602, "message": "Missing session_id"},
+                "error": {"code": -32602, "message": "Invalid Params: Missing session_id (provide via X-Session-Id header or body)"},
             },
             status_code=400,
         )
@@ -517,20 +558,29 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
     if session_id not in _sessions:
         available_sessions = list(_sessions.keys())
         logger.warning(
-            f"Invalid session_id: {session_id[:8]}... "
-            f"(available: {len(available_sessions)} sessions, "
-            f"recent: {available_sessions[-3:] if available_sessions else 'none'})"
+            f"Invalid session_id for method '{method}': {session_id[:8]}... "
+            f"(available: {len(available_sessions)} sessions)"
         )
-        # Check if session might have just expired
+        # Log recent sessions for debugging
         if available_sessions:
-            logger.info(f"Most recent session: {available_sessions[-1]}")
+            recent = available_sessions[-5:]  # Show last 5 sessions
+            logger.info(f"Recent sessions: {[s[:8] + '...' for s in recent]}")
+            logger.debug(f"Full recent session IDs: {recent}")
+        else:
+            logger.warning("No active sessions available")
+            
+        # Check if this might be a timing issue (session created but not yet registered)
+        # This shouldn't happen, but log it if it does
+        logger.debug(f"Request headers: X-Session-Id={request.headers.get('X-Session-Id')}")
+        logger.debug(f"Request body session_id: {body.get('session_id')}")
+        
         return JSONResponse(
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {
                     "code": -32602,
-                    "message": f"Invalid or expired session_id. Available sessions: {len(available_sessions)}",
+                    "message": f"Invalid or expired session_id '{session_id[:8]}...'. Available sessions: {len(available_sessions)}",
                 },
             },
             status_code=400,
