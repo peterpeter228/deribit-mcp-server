@@ -263,6 +263,7 @@ class DeribitJsonRpcClient:
             # Deribit JSON-RPC: POST to base URL with method in body
             # Example: POST https://www.deribit.com/api/v2
             #          Body: {"jsonrpc":"2.0","id":1,"method":"public/get_time","params":{}}
+            logger.debug(f"Making request: {method}")
             response = await self.http_client.post(
                 "",  # Empty path = POST to base_url directly
                 json=payload,
@@ -270,18 +271,24 @@ class DeribitJsonRpcClient:
             )
             response.raise_for_status()
             data = response.json()
+                
         except httpx.TimeoutException as e:
+            logger.error(f"Request timeout: {method} after {self.settings.timeout_s}s")
             raise DeribitTimeoutError(
                 code=-1,
                 message=f"Request timeout after {self.settings.timeout_s}s",
                 data=str(e),
             )
         except httpx.HTTPStatusError as e:
+            error_text = e.response.text[:500]
+            sanitized_error = sanitize_log_message(error_text)
+            logger.error(f"HTTP error {e.response.status_code} for {method}: {sanitized_error}")
             raise DeribitError(
                 code=e.response.status_code,
-                message=f"HTTP error: {e.response.text[:200]}",
+                message=f"HTTP error: {sanitized_error}",
             )
         except Exception as e:
+            logger.error(f"Request failed for {method}: {type(e).__name__}: {e}")
             raise DeribitError(
                 code=-1,
                 message=f"Request failed: {type(e).__name__}",
@@ -417,25 +424,44 @@ class DeribitJsonRpcClient:
                 )
 
             # Authenticate
-            logger.info("Authenticating with Deribit...")
-            result = await self._do_request(
-                "public/auth",
-                {
-                    "grant_type": "client_credentials",
-                    "client_id": self.settings.client_id,
-                    "client_secret": self.settings.client_secret.get_secret_value(),
-                },
-            )
+            logger.info(f"Authenticating with Deribit (client_id: {self.settings.client_id[:4]}****)...")
+            try:
+                result = await self._do_request(
+                    "public/auth",
+                    {
+                        "grant_type": "client_credentials",
+                        "client_id": self.settings.client_id,
+                        "client_secret": self.settings.client_secret.get_secret_value(),
+                    },
+                )
+                
+                if not result or "access_token" not in result:
+                    raise DeribitAuthError(
+                        code=13009,
+                        message="Authentication response missing access_token",
+                        data=result,
+                    )
 
-            # Store token
-            self._auth_token = AuthToken(
-                access_token=result["access_token"],
-                refresh_token=result.get("refresh_token", ""),
-                expires_at=time.time() + result.get("expires_in", 900),
-            )
+                # Store token
+                self._auth_token = AuthToken(
+                    access_token=result["access_token"],
+                    refresh_token=result.get("refresh_token", ""),
+                    expires_at=time.time() + result.get("expires_in", 900),
+                )
 
-            logger.info("Authentication successful")
-            return self._auth_token.access_token
+                logger.info(f"Authentication successful (expires in {result.get('expires_in', 900)}s)")
+                return self._auth_token.access_token
+            except DeribitAuthError as e:
+                logger.error(f"Authentication failed: {e.code} - {e.message}")
+                if e.code == 13009:
+                    logger.error("Invalid credentials - please check DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET")
+                raise
+            except Exception as e:
+                logger.error(f"Unexpected authentication error: {type(e).__name__}: {e}", exc_info=True)
+                raise DeribitAuthError(
+                    code=13009,
+                    message=f"Authentication error: {str(e)[:200]}",
+                )
 
     async def call_public(
         self,

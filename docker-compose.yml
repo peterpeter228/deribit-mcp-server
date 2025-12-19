@@ -1,13 +1,11 @@
 # Docker Compose for Deribit MCP Server
 # =============================================================================
 # 用法:
-#   docker-compose up -d        # 后台启动
-#   docker-compose logs -f      # 查看日志
-#   docker-compose down         # 停止
-#   docker-compose restart      # 重启
+#   docker compose up -d        # 后台启动
+#   docker compose logs -f      # 查看日志
+#   docker compose down         # 停止
+#   docker compose restart      # 重启
 # =============================================================================
-
-version: "3.8"
 
 services:
   deribit-mcp:
@@ -17,8 +15,12 @@ services:
 
     container_name: deribit-mcp-server
 
+    # Load environment variables from .env file if it exists
+    env_file:
+      - .env
+
     ports:
-      - "${DERIBIT_PORT:-8000}:8000"
+      - "${DERIBIT_PORT:-8005}:8000"  # Host port:Container port
 
     environment:
       # 环境选择
@@ -44,7 +46,7 @@ services:
 
       # 服务器设置
       - DERIBIT_HOST=0.0.0.0
-      - DERIBIT_PORT=8000
+      - DERIBIT_PORT=8000  # Container internal port (always 8000)
 
     # 健康检查
     healthcheck:
