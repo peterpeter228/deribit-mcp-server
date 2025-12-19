@@ -257,26 +257,21 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
     session._heartbeat_task = asyncio.create_task(_send_heartbeat(session))
 
     async def event_generator():
-        # Send session initialization
-        yield {
-            "event": "session",
-            "data": _compact_json(
-                {
-                    "session_id": session_id,
-                    "protocol": "mcp",
-                    "version": "1.0",
-                }
-            ),
-        }
-
         try:
+            # Send session initialization first
+            yield {
+                "event": "session",
+                "data": _compact_json(
+                    {
+                        "session_id": session_id,
+                        "protocol": "mcp",
+                        "version": "1.0",
+                    }
+                ),
+            }
+
             # Use asyncio.wait_for to detect client disconnection
             while not session._closed:
-                # Check if client disconnected (is_disconnected is a property, not a coroutine)
-                if request.is_disconnected:
-                    logger.info(f"Client disconnected for SSE session {session_id}")
-                    break
-
                 try:
                     # Wait for message with timeout to detect disconnections
                     message = await asyncio.wait_for(
@@ -294,8 +289,12 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
                     if session.is_timed_out():
                         logger.info(f"SSE session {session_id} timed out")
                         break
-                    # Continue waiting if not timed out
+                    # Continue waiting if not timed out (heartbeat will be sent by heartbeat task)
                     continue
+                except GeneratorExit:
+                    # Client closed the connection
+                    logger.info(f"SSE connection closed by client for session {session_id}")
+                    break
                 except Exception as e:
                     logger.debug(f"Error in event generator for {session_id}: {e}")
                     break
