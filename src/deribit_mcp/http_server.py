@@ -71,6 +71,7 @@ def _compact_json(data: dict) -> str:
 MCP_SESSION_HEADER = "Mcp-Session-Id"
 LEGACY_SESSION_HEADER = "X-Session-Id"
 MCP_MESSAGE_PATH = "/mcp/message"
+IP_INFER_WINDOW_S = 30.0
 
 
 # =============================================================================
@@ -315,10 +316,19 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
             #
             # To maximize compatibility, we include session_id in the endpoint URL
             # (query param) AND also expose it via headers.
+            # Prefer relative endpoint for maximal client compatibility.
+            # Some clients incorrectly double-prefix absolute URLs.
+            endpoint_rel = f"{MCP_MESSAGE_PATH}?session_id={session_id}"
+            yield {"event": "endpoint", "data": endpoint_rel}
+
+            # Also provide absolute endpoint for clients that require it.
             base = str(request.base_url).rstrip("/")
-            endpoint_url = f"{base}{MCP_MESSAGE_PATH}?session_id={session_id}"
-            yield {"event": "endpoint", "data": endpoint_url}
-            logger.debug(f"SSE session {session_id} endpoint announced: {endpoint_url}")
+            endpoint_abs = f"{base}{endpoint_rel}"
+            yield {"event": "endpoint", "data": endpoint_abs}
+
+            logger.debug(
+                f"SSE session {session_id} endpoint announced: rel={endpoint_rel} abs={endpoint_abs}"
+            )
 
             # Main message loop - keep connection alive
             while connection_alive and not session._closed:
@@ -482,7 +492,7 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
     )
 
     # Last-resort compatibility: infer session by client IP if client didn't/can't
-    # provide a session_id. Only allow when exactly one recent active session exists.
+    # provide a session_id (common with some GUI clients).
     if not session_id:
         client_ip = request.client.host if request.client else None
         if client_ip:
@@ -490,13 +500,14 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
                 s for s in _sessions.values()
                 if s.client_ip == client_ip and not s._closed and not s.is_timed_out()
             ]
-            # Prefer the most recently created session for this IP
+            # Prefer the most recently created session for this IP, but only within a short window.
+            now = asyncio.get_event_loop().time()
             recent.sort(key=lambda s: s.created_at, reverse=True)
-            # Only accept inference when there is a clear single candidate.
-            if len(recent) == 1:
+            if recent and (now - recent[0].created_at) <= IP_INFER_WINDOW_S:
                 session_id = recent[0].session_id
                 logger.info(
-                    f"Inferred session_id {session_id[:8]}... for client {client_ip} (no session provided)"
+                    f"Inferred session_id {session_id[:8]}... for client {client_ip} "
+                    f"(no session provided; candidates={len(recent)})"
                 )
     
     method = body.get("method")
