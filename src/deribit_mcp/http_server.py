@@ -78,13 +78,21 @@ class SSESession:
         self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def send(self, event: str, data: dict):
-        """Send an event to the client."""
+        """
+        Send an event to the client.
+        
+        Args:
+            event: Event type (ignored, always uses "message" for MCP)
+            data: JSON-RPC 2.0 formatted message dict
+        """
         if self._closed:
             return
         self.last_activity = asyncio.get_event_loop().time()
+        # Format as MCP message - all messages use "message" event type
+        # Data should already be JSON-RPC 2.0 formatted
         await self.queue.put(
             {
-                "event": event,
+                "event": "message",  # MCP standard event type
                 "data": _compact_json(data),
             }
         )
@@ -147,19 +155,24 @@ async def _cleanup_stale_sessions():
 async def _send_heartbeat(session: SSESession):
     """Send periodic heartbeat to keep connection alive."""
     try:
-        # Wait a bit before starting heartbeat to let connection stabilize
-        await asyncio.sleep(10.0)
+        # Wait longer before starting heartbeat to let connection fully establish
+        await asyncio.sleep(20.0)
         
         while not session._closed:
             if session._closed or session.is_timed_out():
                 break
             
             try:
-                # Send heartbeat ping
-                await session.send("ping", {
-                    "timestamp": asyncio.get_event_loop().time(),
-                    "session_id": session.session_id
-                })
+                # Send heartbeat as MCP notification
+                heartbeat_message = {
+                    "jsonrpc": "2.0",
+                    "method": "ping",
+                    "params": {
+                        "timestamp": asyncio.get_event_loop().time(),
+                        "session_id": session.session_id
+                    },
+                }
+                await session.send("notification", heartbeat_message)
                 logger.debug(f"Heartbeat sent for session {session.session_id}")
             except Exception as e:
                 logger.debug(f"Error sending heartbeat for {session.session_id}: {e}")
@@ -262,85 +275,106 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
 
     Creates a new session and returns an SSE stream.
     Clients should POST to /mcp/message with the session_id to send messages.
+    
+    MCP SSE Format:
+    - Event type: "message" (standard MCP format)
+    - Data: JSON-RPC 2.0 formatted string
     """
     session_id = str(uuid.uuid4())
     session = SSESession(session_id)
     _sessions[session_id] = session
 
-    logger.info(f"SSE session created: {session_id} (client: {request.client.host if request.client else 'unknown'})")
+    client_ip = request.client.host if request.client else 'unknown'
+    logger.info(f"SSE session created: {session_id} (client: {client_ip})")
 
     # Start heartbeat task (delayed to let connection stabilize)
     session._heartbeat_task = asyncio.create_task(_send_heartbeat(session))
 
     async def event_generator():
+        connection_alive = True
         try:
             # Send session initialization message immediately
-            # Format: event: session\ndata: {...}\n\n
-            init_data = {
-                "session_id": session_id,
-                "protocol": "mcp",
-                "version": "1.0",
+            # MCP format: event: message, data: JSON-RPC message
+            init_message = {
+                "jsonrpc": "2.0",
+                "method": "session/init",
+                "params": {
+                    "session_id": session_id,
+                    "protocol": "mcp",
+                    "version": "1.0",
+                },
             }
             yield {
-                "event": "session",
-                "data": _compact_json(init_data),
+                "event": "message",
+                "data": _compact_json(init_message),
             }
             
-            logger.debug(f"SSE session {session_id} initialization sent")
+            logger.debug(f"SSE session {session_id} initialization sent to {client_ip}")
 
-            # Main message loop
-            while not session._closed:
+            # Main message loop - keep connection alive
+            while connection_alive and not session._closed:
                 try:
-                    # Wait for message with timeout
-                    message = await asyncio.wait_for(
-                        session.queue.get(), timeout=10.0
-                    )
+                    # Wait for message with reasonable timeout
+                    # Longer timeout reduces CPU usage while still checking connection
+                    try:
+                        message = await asyncio.wait_for(
+                            session.queue.get(), timeout=15.0
+                        )
+                    except asyncio.TimeoutError:
+                        # Timeout occurred - check if we should continue
+                        # Don't check disconnect status too frequently to avoid overhead
+                        if session.is_timed_out():
+                            logger.info(f"SSE session {session_id} timed out after {session.CONNECTION_TIMEOUT}s")
+                            connection_alive = False
+                            break
+                        # Continue waiting - heartbeat will keep connection alive
+                        continue
                     
                     if message is None:
                         # Close signal received
                         logger.debug(f"SSE session {session_id} received close signal")
+                        connection_alive = False
                         break
                     
                     # Yield the message to client
-                    yield message
-                    
-                except asyncio.TimeoutError:
-                    # Timeout - check connection status
-                    try:
-                        # Check if client is still connected
-                        if hasattr(request, 'is_disconnected') and request.is_disconnected:
-                            logger.info(f"Client disconnected for SSE session {session_id}")
-                            break
-                    except (AttributeError, RuntimeError):
-                        # Can't check disconnect status, continue
-                        pass
-                    
-                    # Check if session timed out
-                    if session.is_timed_out():
-                        logger.info(f"SSE session {session_id} timed out after {session.CONNECTION_TIMEOUT}s")
-                        break
-                    
-                    # Continue waiting (heartbeat will be sent by background task)
-                    continue
+                    # Message should already be in correct format: {"event": "message", "data": "..."}
+                    if isinstance(message, dict) and "event" in message and "data" in message:
+                        yield message
+                    else:
+                        # Fallback: wrap in MCP format
+                        logger.warning(f"Unexpected message format for session {session_id}: {type(message)}")
+                        mcp_message = {
+                            "jsonrpc": "2.0",
+                            "method": "notification",
+                            "params": message if isinstance(message, dict) else {"data": str(message)},
+                        }
+                        yield {
+                            "event": "message",
+                            "data": _compact_json(mcp_message),
+                        }
                     
                 except GeneratorExit:
                     # Client closed the connection gracefully
-                    logger.info(f"SSE connection closed by client for session {session_id}")
+                    logger.info(f"SSE connection closed by client {client_ip} for session {session_id}")
+                    connection_alive = False
                     break
                     
                 except asyncio.CancelledError:
                     # Task was cancelled
                     logger.debug(f"SSE session {session_id} generator cancelled")
+                    connection_alive = False
                     break
                     
                 except Exception as e:
                     logger.error(f"Error in event generator for {session_id}: {e}", exc_info=True)
+                    connection_alive = False
                     break
                     
         except Exception as e:
             logger.error(f"Fatal error in event generator for {session_id}: {e}", exc_info=True)
         finally:
             # Cleanup session
+            connection_alive = False
             try:
                 await session.close()
             except Exception as e:
@@ -349,15 +383,16 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
             if session_id in _sessions:
                 del _sessions[session_id]
             
-            logger.info(f"SSE session closed: {session_id}")
+            logger.info(f"SSE session closed: {session_id} (client: {client_ip})")
 
     return EventSourceResponse(
         event_generator(),
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable buffering for nginx/proxy
             "X-Session-Id": session_id,
+            "Content-Type": "text/event-stream; charset=utf-8",
         },
     )
 
