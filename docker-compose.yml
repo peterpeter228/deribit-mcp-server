@@ -1,13 +1,11 @@
 # Docker Compose for Deribit MCP Server
 # =============================================================================
 # 用法:
-#   docker-compose up -d        # 后台启动
-#   docker-compose logs -f      # 查看日志
-#   docker-compose down         # 停止
-#   docker-compose restart      # 重启
+#   docker compose up -d        # 后台启动
+#   docker compose logs -f      # 查看日志
+#   docker compose down         # 停止
+#   docker compose restart      # 重启
 # =============================================================================
-
-version: "3.8"
 
 services:
   deribit-mcp:
