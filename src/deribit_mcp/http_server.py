@@ -157,27 +157,34 @@ async def _send_heartbeat(session: SSESession):
     """Send periodic heartbeat to keep connection alive."""
     try:
         # Wait longer before starting heartbeat to let connection fully establish
-        await asyncio.sleep(20.0)
+        # MCP clients may need time to process initialization
+        await asyncio.sleep(30.0)
         
+        heartbeat_count = 0
         while not session._closed:
             if session._closed or session.is_timed_out():
                 break
             
             try:
-                # Send heartbeat as MCP notification
-                heartbeat_message = {
-                    "jsonrpc": "2.0",
-                    "method": "ping",
-                    "params": {
-                        "timestamp": asyncio.get_event_loop().time(),
-                        "session_id": session.session_id
-                    },
-                }
-                await session.send("notification", heartbeat_message)
-                logger.debug(f"Heartbeat sent for session {session.session_id}")
+                # Send heartbeat as MCP notification (optional, some clients don't need it)
+                # Only send if session is still active
+                if not session._closed:
+                    heartbeat_message = {
+                        "jsonrpc": "2.0",
+                        "method": "ping",
+                        "params": {
+                            "timestamp": asyncio.get_event_loop().time(),
+                            "session_id": session.session_id,
+                            "count": heartbeat_count,
+                        },
+                    }
+                    await session.send("notification", heartbeat_message)
+                    heartbeat_count += 1
+                    logger.debug(f"Heartbeat #{heartbeat_count} sent for session {session.session_id}")
             except Exception as e:
                 logger.debug(f"Error sending heartbeat for {session.session_id}: {e}")
-                break
+                # Don't break on heartbeat errors, just log and continue
+                pass
             
             # Wait for next heartbeat interval
             await asyncio.sleep(session.HEARTBEAT_INTERVAL)
@@ -330,23 +337,38 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
     async def event_generator():
         connection_alive = True
         try:
-            # Send session initialization message immediately
-            # MCP format: event: message, data: JSON-RPC message
-            init_message = {
+            # MCP SSE protocol: 
+            # 1. Server opens SSE stream
+            # 2. Client sends initialize request via POST to /mcp/message
+            # 3. Server responds via SSE stream with initialize response
+            # 
+            # For compatibility, we send an immediate connection notification
+            # This helps clients detect the connection is ready and know the session_id
+            
+            # Send connection established notification immediately
+            # This is critical - some clients wait for this before sending initialize
+            # Format: SSE event with JSON-RPC 2.0 notification
+            connection_notification = {
                 "jsonrpc": "2.0",
-                "method": "session/init",
+                "method": "notifications/initialized",
                 "params": {
                     "session_id": session_id,
                     "protocol": "mcp",
-                    "version": "1.0",
+                    "version": "2024-11-05",
                 },
             }
-            yield {
-                "event": "message",
-                "data": _compact_json(init_message),
-            }
             
-            logger.debug(f"SSE session {session_id} initialization sent to {client_ip}")
+            # Yield the initial message - this must be sent immediately
+            initial_event = {
+                "event": "message",
+                "data": _compact_json(connection_notification),
+            }
+            yield initial_event
+            
+            logger.info(f"SSE session {session_id} initialized and ready (client: {client_ip})")
+            
+            # Small delay to ensure message is flushed to client
+            await asyncio.sleep(0.1)
 
             # Main message loop - keep connection alive
             while connection_alive and not session._closed:
@@ -430,7 +452,10 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
             "X-Accel-Buffering": "no",  # Disable buffering for nginx/proxy
             "X-Session-Id": session_id,
             "Content-Type": "text/event-stream; charset=utf-8",
+            "Access-Control-Allow-Origin": "*",  # CORS for web clients
+            "Access-Control-Allow-Headers": "Cache-Control",
         },
+        ping=None,  # Disable automatic ping, we handle it manually
     )
 
 
@@ -439,9 +464,10 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
     Handle MCP messages via HTTP POST.
 
     Expects JSON body with:
-    - session_id: SSE session ID
+    - session_id: SSE session ID (from X-Session-Id header or body)
     - method: MCP method name
     - params: Method parameters
+    - id: Request ID (optional, defaults to 1)
     """
     try:
         body = await request.json()
@@ -451,14 +477,34 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    session_id = body.get("session_id")
+    # Try to get session_id from header first, then body
+    session_id = request.headers.get("X-Session-Id") or body.get("session_id")
     method = body.get("method")
     params = body.get("params", {})
-    request_id = body.get("id", 1)
+    request_id = body.get("id")
+    
+    # Generate request_id if not provided
+    if request_id is None:
+        request_id = 1
 
-    if not session_id or session_id not in _sessions:
+    if not session_id:
         return JSONResponse(
-            {"error": True, "code": 400, "message": "Invalid or missing session_id"},
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32602, "message": "Missing session_id"},
+            },
+            status_code=400,
+        )
+    
+    if session_id not in _sessions:
+        logger.warning(f"Invalid session_id: {session_id} (available sessions: {list(_sessions.keys())[:3]})")
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32602, "message": f"Invalid or expired session_id: {session_id}"},
+            },
             status_code=400,
         )
 
@@ -470,9 +516,15 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
     # Check if session is closed or timed out
     if session._closed or session.is_timed_out():
         return JSONResponse(
-            {"error": True, "code": 400, "message": "Session expired or closed"},
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32000, "message": "Session expired or closed"},
+            },
             status_code=400,
         )
+    
+    logger.info(f"MCP message: {method} for session {session_id[:8]}...")
 
     # Handle MCP methods
     if method == "tools/list":
@@ -535,22 +587,40 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
             return JSONResponse(error_response)
 
     elif method == "initialize":
-        # Handle MCP initialization
+        # Handle MCP initialization - this is critical for client connection
+        logger.info(f"MCP initialize request for session {session_id} (request_id: {request_id})")
+        
+        # Get capabilities based on configuration
+        settings = get_settings()
+        capabilities = {
+            "tools": {
+                "listChanged": False,  # We don't support dynamic tool changes
+            },
+        }
+        
+        # Build initialize response according to MCP spec
         response = {
             "jsonrpc": "2.0",
-            "id": request_id,
+            "id": request_id,  # Must match client's request ID
             "result": {
                 "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {},
-                },
+                "capabilities": capabilities,
                 "serverInfo": {
                     "name": "deribit-mcp-server",
                     "version": "1.0.0",
                 },
             },
         }
+        
+        # Send response via SSE FIRST (this is what the client is waiting for)
+        # The client is likely blocking on this response
         await session.send("response", response)
+        logger.info(f"MCP initialize response sent via SSE for session {session_id}")
+        
+        # Small delay to ensure SSE message is sent before HTTP response
+        await asyncio.sleep(0.05)
+        
+        # Also return HTTP response for compatibility
         return JSONResponse(response)
 
     else:
