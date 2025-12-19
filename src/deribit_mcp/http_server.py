@@ -345,30 +345,17 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
             # For compatibility, we send an immediate connection notification
             # This helps clients detect the connection is ready and know the session_id
             
-            # Send connection established notification immediately
-            # This is critical - some clients wait for this before sending initialize
-            # Format: SSE event with JSON-RPC 2.0 notification
-            connection_notification = {
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {
-                    "session_id": session_id,
-                    "protocol": "mcp",
-                    "version": "2024-11-05",
-                },
-            }
+            # MCP SSE Protocol:
+            # According to MCP spec, the server should NOT send an initial message
+            # The client will connect to SSE, then send initialize request via POST to /mcp/message
+            # Server responds via SSE stream only when client sends requests
+            # 
+            # We keep the connection open and wait for client to send initialize
             
-            # Yield the initial message - this must be sent immediately
-            initial_event = {
-                "event": "message",
-                "data": _compact_json(connection_notification),
-            }
-            yield initial_event
+            logger.info(f"SSE session {session_id} stream opened, waiting for initialize request (client: {client_ip})")
             
-            logger.info(f"SSE session {session_id} initialized and ready (client: {client_ip})")
-            
-            # Small delay to ensure message is flushed to client
-            await asyncio.sleep(0.1)
+            # Don't send any initial message - just keep connection open
+            # Client will send initialize request to /mcp/message endpoint
 
             # Main message loop - keep connection alive
             while connection_alive and not session._closed:
@@ -524,7 +511,7 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
     
-    logger.info(f"MCP message: {method} for session {session_id[:8]}...")
+    logger.info(f"MCP message received: {method} (id={request_id}) for session {session_id[:8]}...")
 
     # Handle MCP methods
     if method == "tools/list":
