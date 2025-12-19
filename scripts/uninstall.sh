@@ -28,9 +28,14 @@ print_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
 # 检查 root 权限
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}[ERROR]${NC} 此脚本需要 root 权限运行"
+    print_error "此脚本需要 root 权限运行"
+    print_info "请使用: sudo bash uninstall.sh"
     exit 1
 fi
 
@@ -45,6 +50,8 @@ if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
     exit 0
 fi
 
+echo ""
+
 # 停止并禁用服务
 print_info "停止服务..."
 systemctl stop deribit-mcp 2>/dev/null || true
@@ -55,6 +62,10 @@ print_info "删除 systemd 服务..."
 rm -f /etc/systemd/system/deribit-mcp.service
 rm -f /etc/systemd/system/deribit-mcp-stdio@.service
 systemctl daemon-reload
+
+# 删除 cron 任务（如果存在）
+print_info "清理 cron 任务..."
+crontab -l 2>/dev/null | grep -v "deribit-mcp" | crontab - 2>/dev/null || true
 
 # 询问是否保留配置
 read -p "是否保留配置文件? (Y/n): " keep_config
@@ -86,7 +97,10 @@ read -p "是否删除系统用户 '$APP_USER'? (y/N): " delete_user
 if [[ "$delete_user" == "y" || "$delete_user" == "Y" ]]; then
     print_info "删除用户..."
     userdel "$APP_USER" 2>/dev/null || true
+    print_info "用户已删除"
+else
+    print_warn "用户 '$APP_USER' 保留"
 fi
 
 echo ""
-echo -e "${GREEN}卸载完成!${NC}"
+echo -e "${GREEN}✓ 卸载完成!${NC}"

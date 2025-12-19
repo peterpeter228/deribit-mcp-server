@@ -1,71 +1,61 @@
 # Deribit MCP Server Docker Image
-# Multi-stage build for smaller final image
-
 # =============================================================================
-# Build Stage
+# 支持 amd64 和 arm64 架构
+# 
+# 构建: docker build -t deribit-mcp .
+# 运行: docker run -p 8000:8000 deribit-mcp
 # =============================================================================
-FROM python:3.11-slim as builder
 
-WORKDIR /app
-
-# Install uv for fast dependency management
-RUN pip install --no-cache-dir uv
-
-# Copy project files
-COPY pyproject.toml .
-COPY src/ src/
-
-# Install dependencies
-RUN uv sync --no-dev
-
-# =============================================================================
-# Runtime Stage
-# =============================================================================
 FROM python:3.11-slim
 
+# 设置工作目录
 WORKDIR /app
 
-# Create non-root user for security
+# 设置环境变量
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建非 root 用户
 RUN useradd --create-home --shell /bin/bash appuser
 
-# Copy from builder
-COPY --from=builder /app /app
-COPY --from=builder /root/.local /root/.local
-
-# Install uv in runtime (needed to run commands)
-RUN pip install --no-cache-dir uv
-
-# Copy source code
-COPY src/ src/
+# 复制项目文件
 COPY pyproject.toml .
+COPY src/ src/
 
-# Install package
-RUN uv sync --no-dev
+# 安装 Python 依赖
+RUN pip install --upgrade pip && \
+    pip install -e .
 
-# Set ownership
+# 设置文件权限
 RUN chown -R appuser:appuser /app
 
-# Switch to non-root user
+# 切换到非 root 用户
 USER appuser
 
-# Default environment variables
-ENV DERIBIT_ENV=prod
-ENV DERIBIT_ENABLE_PRIVATE=false
-ENV DERIBIT_HOST=0.0.0.0
-ENV DERIBIT_PORT=8000
-ENV DERIBIT_TIMEOUT_S=10
-ENV DERIBIT_MAX_RPS=8
-ENV DERIBIT_CACHE_TTL_FAST=1.0
-ENV DERIBIT_CACHE_TTL_SLOW=30.0
-ENV DERIBIT_DRY_RUN=true
+# 默认环境变量
+ENV DERIBIT_ENV=prod \
+    DERIBIT_ENABLE_PRIVATE=false \
+    DERIBIT_HOST=0.0.0.0 \
+    DERIBIT_PORT=8000 \
+    DERIBIT_TIMEOUT_S=10 \
+    DERIBIT_MAX_RPS=8 \
+    DERIBIT_CACHE_TTL_FAST=1.0 \
+    DERIBIT_CACHE_TTL_SLOW=30.0 \
+    DERIBIT_DRY_RUN=true
 
-# Expose port
+# 暴露端口
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()" || exit 1
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Default command: HTTP server
-# Override with CMD ["uv", "run", "deribit-mcp"] for stdio mode
-CMD ["uv", "run", "deribit-mcp-http"]
+# 启动命令
+CMD ["python", "-m", "deribit_mcp.http_server"]
