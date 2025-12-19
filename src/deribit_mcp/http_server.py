@@ -39,6 +39,7 @@ from starlette.routing import Route
 
 from .client import get_client, shutdown_client
 from .config import get_settings, sanitize_log_message
+from .diagnostics import run_full_diagnostics, test_authentication, test_private_api, test_public_api
 from .server import _dispatch_tool, get_private_tools, get_public_tools
 from .tools import deribit_status
 
@@ -193,25 +194,61 @@ async def _send_heartbeat(session: SSESession):
 
 
 async def health_check(request: Request) -> JSONResponse:
-    """Health check endpoint."""
+    """Health check endpoint with detailed diagnostics."""
     settings = get_settings()
     client = get_client()
+    
+    diagnostics = {
+        "status": "healthy",
+        "env": settings.env.value,
+        "api_ok": False,
+        "private_enabled": settings.enable_private,
+        "has_credentials": settings.has_credentials,
+        "errors": [],
+    }
 
-    # Quick status check
+    # Test public API
     try:
         status = await deribit_status(client=client)
-        api_ok = status.get("api_ok", False)
-    except Exception:
-        api_ok = False
+        diagnostics["api_ok"] = status.get("api_ok", False)
+        diagnostics["server_time_ms"] = status.get("server_time_ms")
+    except Exception as e:
+        diagnostics["api_ok"] = False
+        diagnostics["errors"].append(f"Public API error: {str(e)[:100]}")
+        logger.error(f"Health check failed: {e}", exc_info=True)
 
-    return JSONResponse(
-        {
-            "status": "healthy" if api_ok else "degraded",
-            "env": settings.env.value,
-            "api_ok": api_ok,
-            "private_enabled": settings.enable_private,
-        }
-    )
+    # Test authentication if private API is enabled
+    if settings.enable_private:
+        try:
+            if not settings.has_credentials:
+                diagnostics["errors"].append("Private API enabled but no credentials configured")
+                diagnostics["status"] = "degraded"
+            else:
+                # Try to get access token
+                try:
+                    token = await client._get_access_token()
+                    if token:
+                        diagnostics["auth_ok"] = True
+                    else:
+                        diagnostics["auth_ok"] = False
+                        diagnostics["errors"].append("Authentication returned empty token")
+                        diagnostics["status"] = "degraded"
+                except Exception as auth_error:
+                    diagnostics["auth_ok"] = False
+                    diagnostics["errors"].append(f"Authentication failed: {str(auth_error)[:100]}")
+                    diagnostics["status"] = "degraded"
+        except Exception as e:
+            diagnostics["auth_ok"] = False
+            diagnostics["errors"].append(f"Auth check error: {str(e)[:100]}")
+            diagnostics["status"] = "degraded"
+
+    # Determine overall status
+    if not diagnostics["api_ok"]:
+        diagnostics["status"] = "unhealthy"
+    elif diagnostics.get("errors"):
+        diagnostics["status"] = "degraded"
+
+    return JSONResponse(diagnostics)
 
 
 async def list_tools_endpoint(request: Request) -> JSONResponse:
@@ -545,6 +582,32 @@ async def close_session_endpoint(request: Request) -> JSONResponse:
     )
 
 
+async def diagnostics_endpoint(request: Request) -> JSONResponse:
+    """Run full diagnostic tests."""
+    try:
+        results = await run_full_diagnostics()
+        return JSONResponse(results)
+    except Exception as e:
+        logger.error(f"Diagnostics error: {e}", exc_info=True)
+        return JSONResponse(
+            {"error": True, "message": str(e)[:200]},
+            status_code=500,
+        )
+
+
+async def test_connection_endpoint(request: Request) -> JSONResponse:
+    """Quick connection test endpoint."""
+    results = {
+        "public_api": await test_public_api(),
+        "authentication": await test_authentication(),
+    }
+    
+    if results["authentication"]["success"]:
+        results["private_api"] = await test_private_api()
+    
+    return JSONResponse(results)
+
+
 # =============================================================================
 # Application Setup
 # =============================================================================
@@ -598,6 +661,8 @@ async def lifespan(app: Starlette):
 # Define routes
 routes = [
     Route("/health", health_check, methods=["GET"]),
+    Route("/diagnostics", diagnostics_endpoint, methods=["GET"]),
+    Route("/test", test_connection_endpoint, methods=["GET"]),
     Route("/tools", list_tools_endpoint, methods=["GET"]),
     Route("/tools/call", call_tool_endpoint, methods=["POST"]),
     Route("/sse", sse_endpoint, methods=["GET"]),
