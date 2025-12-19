@@ -581,6 +581,26 @@ WantedBy=multi-user.target
 
 ### Docker 部署
 
+#### Docker Compose（推荐）
+
+```bash
+# 1) 配置（务必不要提交真实密钥）
+cp .env.example .env
+nano .env
+
+# 2) 启动（后台）
+docker compose up -d --build
+
+# 3) 查看状态/日志
+docker compose ps
+docker compose logs -f
+```
+
+默认情况下，宿主机端口为 `.env` 里的 `DERIBIT_HTTP_PORT`（默认 8005），
+CherryStudio 连接地址应为：
+
+- `http://<你的服务器IP>:8005/sse`
+
 ```dockerfile
 FROM python:3.11-slim
 
