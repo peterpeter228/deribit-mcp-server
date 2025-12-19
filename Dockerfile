@@ -27,6 +27,7 @@ RUN useradd --create-home --shell /bin/bash appuser
 
 # 复制项目文件
 COPY pyproject.toml .
+COPY README.md .
 COPY src/ src/
 
 # 安装 Python 依赖
