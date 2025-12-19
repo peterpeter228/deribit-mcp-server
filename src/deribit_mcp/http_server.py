@@ -84,8 +84,9 @@ class SSESession:
     # Connection timeout (seconds) - close if no activity
     CONNECTION_TIMEOUT = 300.0  # 5 minutes
 
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, client_ip: str):
         self.session_id = session_id
+        self.client_ip = client_ip
         self.queue: asyncio.Queue = asyncio.Queue()
         self.created_at = asyncio.get_event_loop().time()
         self.last_activity = asyncio.get_event_loop().time()
@@ -298,10 +299,9 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
         return Response(status_code=204)
 
     session_id = str(uuid.uuid4())
-    session = SSESession(session_id)
-    _sessions[session_id] = session
-
     client_ip = request.client.host if request.client else 'unknown'
+    session = SSESession(session_id, client_ip=client_ip)
+    _sessions[session_id] = session
     logger.info(f"SSE session created: {session_id} (client: {client_ip})")
 
     async def event_generator():
@@ -413,6 +413,9 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
             "Access-Control-Allow-Origin": "*",  # CORS for web clients
             "Access-Control-Allow-Headers": f"Cache-Control, {MCP_SESSION_HEADER}, {LEGACY_SESSION_HEADER}",
             "Access-Control-Expose-Headers": f"{MCP_SESSION_HEADER}, {LEGACY_SESSION_HEADER}",  # Allow client to read session_id
+            # Many GUI clients (browser-like EventSource) cannot read response headers.
+            # Setting a cookie allows the same-origin POST to automatically carry session_id.
+            "Set-Cookie": f"mcp_session_id={session_id}; Path=/; HttpOnly; SameSite=Lax",
         },
     )
     
@@ -473,9 +476,28 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
         or request.headers.get(MCP_SESSION_HEADER.lower())
         or request.headers.get(LEGACY_SESSION_HEADER)
         or request.headers.get(LEGACY_SESSION_HEADER.lower())
+        or request.cookies.get("mcp_session_id")
         or request.query_params.get("session_id")
         or body.get("session_id")
     )
+
+    # Last-resort compatibility: infer session by client IP if client didn't/can't
+    # provide a session_id. Only allow when exactly one recent active session exists.
+    if not session_id:
+        client_ip = request.client.host if request.client else None
+        if client_ip:
+            recent = [
+                s for s in _sessions.values()
+                if s.client_ip == client_ip and not s._closed and not s.is_timed_out()
+            ]
+            # Prefer the most recently created session for this IP
+            recent.sort(key=lambda s: s.created_at, reverse=True)
+            # Only accept inference when there is a clear single candidate.
+            if len(recent) == 1:
+                session_id = recent[0].session_id
+                logger.info(
+                    f"Inferred session_id {session_id[:8]}... for client {client_ip} (no session provided)"
+                )
     
     method = body.get("method")
     params = body.get("params", {})
