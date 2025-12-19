@@ -147,11 +147,14 @@ async def _cleanup_stale_sessions():
 async def _send_heartbeat(session: SSESession):
     """Send periodic heartbeat to keep connection alive."""
     try:
+        # Wait a bit before starting heartbeat to let connection stabilize
+        await asyncio.sleep(5.0)
+        
         while not session._closed:
-            await asyncio.sleep(session.HEARTBEAT_INTERVAL)
             if session._closed or session.is_timed_out():
                 break
             await session.send("ping", {"timestamp": asyncio.get_event_loop().time()})
+            await asyncio.sleep(session.HEARTBEAT_INTERVAL)
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -251,15 +254,15 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
     session = SSESession(session_id)
     _sessions[session_id] = session
 
-    logger.info(f"SSE session created: {session_id}")
+    logger.info(f"SSE session created: {session_id} (client: {request.client.host if request.client else 'unknown'})")
 
-    # Start heartbeat task
+    # Start heartbeat task (delayed to let connection stabilize)
     session._heartbeat_task = asyncio.create_task(_send_heartbeat(session))
 
     async def event_generator():
         try:
             # Send session initialization first
-            yield {
+            init_message = {
                 "event": "session",
                 "data": _compact_json(
                     {
@@ -269,22 +272,29 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
                     }
                 ),
             }
+            yield init_message
 
             # Use asyncio.wait_for to detect client disconnection
             while not session._closed:
                 try:
                     # Wait for message with timeout to detect disconnections
+                    # Use shorter timeout to check connection status more frequently
                     message = await asyncio.wait_for(
-                        session.queue.get(), timeout=session.HEARTBEAT_INTERVAL + 5
+                        session.queue.get(), timeout=5.0
                     )
                     if message is None:
                         break
                     yield message
                 except asyncio.TimeoutError:
                     # Check if client disconnected during timeout
-                    if request.is_disconnected:
-                        logger.info(f"Client disconnected for SSE session {session_id}")
-                        break
+                    try:
+                        if request.is_disconnected:
+                            logger.info(f"Client disconnected for SSE session {session_id}")
+                            break
+                    except Exception:
+                        # If we can't check disconnect status, assume still connected
+                        pass
+                    
                     # Check if session timed out or should be closed
                     if session.is_timed_out():
                         logger.info(f"SSE session {session_id} timed out")
@@ -298,6 +308,8 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
                 except Exception as e:
                     logger.debug(f"Error in event generator for {session_id}: {e}")
                     break
+        except Exception as e:
+            logger.error(f"Fatal error in event generator for {session_id}: {e}")
         finally:
             # Cleanup session
             await session.close()

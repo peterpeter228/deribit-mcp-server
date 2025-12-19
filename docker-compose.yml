@@ -18,7 +18,7 @@ services:
     container_name: deribit-mcp-server
 
     ports:
-      - "${DERIBIT_PORT:-8000}:8000"
+      - "${DERIBIT_PORT:-8005}:8000"
 
     environment:
       # 环境选择
@@ -44,7 +44,7 @@ services:
 
       # 服务器设置
       - DERIBIT_HOST=0.0.0.0
-      - DERIBIT_PORT=8000
+      - DERIBIT_PORT=${DERIBIT_PORT:-8000}
 
     # 健康检查
     healthcheck:
