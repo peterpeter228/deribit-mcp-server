@@ -34,7 +34,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .client import get_client, shutdown_client
@@ -56,6 +56,22 @@ def _compact_json(data: dict) -> str:
     """Convert dict to compact JSON string."""
     return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
+#
+# MCP HTTP/SSE transport compatibility notes
+# -----------------------------------------------------------------------------
+# Different MCP clients expect slightly different "SSE transport" details.
+# To maximize compatibility:
+# - We expose BOTH `Mcp-Session-Id` (preferred by many clients) and legacy
+#   `X-Session-Id` headers.
+# - We emit an initial `event: endpoint` SSE event to announce where to POST
+#   JSON-RPC messages.
+# - We do NOT send protocol messages like `notifications/initialized` before
+#   the client sends `initialize`, as that breaks stricter clients.
+#
+MCP_SESSION_HEADER = "Mcp-Session-Id"
+LEGACY_SESSION_HEADER = "X-Session-Id"
+MCP_MESSAGE_PATH = "/mcp/message"
+
 
 # =============================================================================
 # SSE Session Management
@@ -65,8 +81,6 @@ def _compact_json(data: dict) -> str:
 class SSESession:
     """Manages an SSE session with message queue."""
 
-    # Heartbeat interval (seconds)
-    HEARTBEAT_INTERVAL = 30.0
     # Connection timeout (seconds) - close if no activity
     CONNECTION_TIMEOUT = 300.0  # 5 minutes
 
@@ -76,7 +90,6 @@ class SSESession:
         self.created_at = asyncio.get_event_loop().time()
         self.last_activity = asyncio.get_event_loop().time()
         self._closed = False
-        self._heartbeat_task: Optional[asyncio.Task] = None
 
     async def send(self, event: str, data: dict):
         """
@@ -103,8 +116,6 @@ class SSESession:
         if self._closed:
             return
         self._closed = True
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
         await self.queue.put(None)
 
     def mark_activity(self):
@@ -151,49 +162,6 @@ async def _cleanup_stale_sessions():
             break
         except Exception as e:
             logger.error(f"Error in cleanup task: {e}")
-
-
-async def _send_heartbeat(session: SSESession):
-    """Send periodic heartbeat to keep connection alive."""
-    try:
-        # Wait longer before starting heartbeat to let connection fully establish
-        # MCP clients may need time to process initialization
-        await asyncio.sleep(30.0)
-        
-        heartbeat_count = 0
-        while not session._closed:
-            if session._closed or session.is_timed_out():
-                break
-            
-            try:
-                # Send heartbeat as MCP notification (optional, some clients don't need it)
-                # Only send if session is still active
-                if not session._closed:
-                    heartbeat_message = {
-                        "jsonrpc": "2.0",
-                        "method": "ping",
-                        "params": {
-                            "timestamp": asyncio.get_event_loop().time(),
-                            "session_id": session.session_id,
-                            "count": heartbeat_count,
-                        },
-                    }
-                    await session.send("notification", heartbeat_message)
-                    heartbeat_count += 1
-                    logger.debug(f"Heartbeat #{heartbeat_count} sent for session {session.session_id}")
-            except Exception as e:
-                logger.debug(f"Error sending heartbeat for {session.session_id}: {e}")
-                # Don't break on heartbeat errors, just log and continue
-                pass
-            
-            # Wait for next heartbeat interval
-            await asyncio.sleep(session.HEARTBEAT_INTERVAL)
-            
-    except asyncio.CancelledError:
-        logger.debug(f"Heartbeat task cancelled for session {session.session_id}")
-    except Exception as e:
-        logger.debug(f"Heartbeat error for session {session.session_id}: {e}")
-
 
 # =============================================================================
 # HTTP Endpoints
@@ -324,6 +292,11 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
     - Event type: "message" (standard MCP format)
     - Data: JSON-RPC 2.0 formatted string
     """
+    # Some clients/scripts probe with HEAD. Creating a session for HEAD is
+    # counterproductive (it immediately closes and causes "expired session").
+    if request.method.upper() == "HEAD":
+        return Response(status_code=204)
+
     session_id = str(uuid.uuid4())
     session = SSESession(session_id)
     _sessions[session_id] = session
@@ -331,57 +304,13 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
     client_ip = request.client.host if request.client else 'unknown'
     logger.info(f"SSE session created: {session_id} (client: {client_ip})")
 
-    # Start heartbeat task (delayed to let connection stabilize)
-    session._heartbeat_task = asyncio.create_task(_send_heartbeat(session))
-
     async def event_generator():
         connection_alive = True
         try:
-            # MCP SSE protocol: 
-            # 1. Server opens SSE stream
-            # 2. Client sends initialize request via POST to /mcp/message
-            # 3. Server responds via SSE stream with initialize response
-            # 
-            # For compatibility, we send an immediate connection notification
-            # This helps clients detect the connection is ready and know the session_id
-            
-            # MCP SSE Protocol:
-            # 1. Client connects to SSE endpoint
-            # 2. Server sends session_id in header (X-Session-Id) - already done
-            # 3. Optionally send a connection notification so client knows connection is ready
-            # 4. Client sends initialize request via POST to /mcp/message
-            # 5. Server responds via SSE stream
-            
-            # MCP SSE Protocol:
-            # According to MCP spec, server should NOT send initial messages
-            # Client connects, gets session_id from X-Session-Id header,
-            # then sends initialize request via POST to /mcp/message
-            # Server responds via SSE stream
-            
-            # However, some clients may need a connection confirmation
-            # Send a minimal message event (not a comment) to indicate connection is ready
-            # This uses the standard "message" event type with a notification
-            
-            # Send connection ready notification (optional, helps some clients)
-            try:
-                ready_notification = {
-                    "jsonrpc": "2.0",
-                    "method": "notifications/initialized",
-                    "params": {
-                        "session_id": session_id,
-                    },
-                }
-                yield {
-                    "event": "message",
-                    "data": _compact_json(ready_notification),
-                }
-                logger.info(f"SSE session {session_id} connection ready notification sent (client: {client_ip})")
-            except Exception as e:
-                logger.warning(f"Error sending ready notification: {e}")
-                # Continue anyway - session_id is in header, connection is still valid
-            
-            # Now wait for client to send initialize request
-            logger.debug(f"Waiting for initialize request for session {session_id}")
+            # MCP SSE transport: announce message endpoint to client.
+            # Many clients require this `endpoint` event to know where to POST.
+            yield {"event": "endpoint", "data": MCP_MESSAGE_PATH}
+            logger.debug(f"SSE session {session_id} endpoint announced: {MCP_MESSAGE_PATH}")
 
             # Main message loop - keep connection alive
             while connection_alive and not session._closed:
@@ -460,15 +389,22 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
     # Create SSE response with proper headers
     response = EventSourceResponse(
         event_generator(),
+        # Keep-alive pings should be SSE comments (not JSON-RPC),
+        # so strict MCP clients don't treat them as protocol messages.
+        # sse-starlette sends comment pings when `ping` is set.
+        ping=15,
         headers={
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable buffering for nginx/proxy
-            "X-Session-Id": session_id,  # Critical: client needs this to send messages
+            # Preferred header for MCP clients
+            MCP_SESSION_HEADER: session_id,
+            # Back-compat for existing scripts/clients
+            LEGACY_SESSION_HEADER: session_id,
             "Content-Type": "text/event-stream; charset=utf-8",
             "Access-Control-Allow-Origin": "*",  # CORS for web clients
-            "Access-Control-Allow-Headers": "Cache-Control, X-Session-Id",
-            "Access-Control-Expose-Headers": "X-Session-Id",  # Allow client to read session_id
+            "Access-Control-Allow-Headers": f"Cache-Control, {MCP_SESSION_HEADER}, {LEGACY_SESSION_HEADER}",
+            "Access-Control-Expose-Headers": f"{MCP_SESSION_HEADER}, {LEGACY_SESSION_HEADER}",  # Allow client to read session_id
         },
     )
     
@@ -485,7 +421,8 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
     - params: Method parameters (optional)
     - id: Request ID (optional, defaults to 1)
     
-    Session ID should be provided via X-Session-Id header (preferred) or in body.
+    Session ID should be provided via Mcp-Session-Id header (preferred),
+    or legacy X-Session-Id, or query/body for compatibility.
     """
     # Parse request body
     try:
@@ -521,10 +458,16 @@ async def mcp_message_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    # Try to get session_id from header first, then body
-    session_id = request.headers.get("X-Session-Id")
-    if not session_id:
-        session_id = body.get("session_id")
+    # Try to get session_id from header first (MCP standard), then legacy header,
+    # then query/body for compatibility.
+    session_id = (
+        request.headers.get(MCP_SESSION_HEADER)
+        or request.headers.get(MCP_SESSION_HEADER.lower())
+        or request.headers.get(LEGACY_SESSION_HEADER)
+        or request.headers.get(LEGACY_SESSION_HEADER.lower())
+        or request.query_params.get("session_id")
+        or body.get("session_id")
+    )
     
     method = body.get("method")
     params = body.get("params", {})
