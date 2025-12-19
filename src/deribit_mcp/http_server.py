@@ -346,16 +346,29 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
             # This helps clients detect the connection is ready and know the session_id
             
             # MCP SSE Protocol:
-            # According to MCP spec, the server should NOT send an initial message
-            # The client will connect to SSE, then send initialize request via POST to /mcp/message
-            # Server responds via SSE stream only when client sends requests
-            # 
-            # We keep the connection open and wait for client to send initialize
+            # 1. Client connects to SSE endpoint
+            # 2. Server sends session_id in header (X-Session-Id) - already done
+            # 3. Optionally send a connection notification so client knows connection is ready
+            # 4. Client sends initialize request via POST to /mcp/message
+            # 5. Server responds via SSE stream
             
-            logger.info(f"SSE session {session_id} stream opened, waiting for initialize request (client: {client_ip})")
+            # Send a simple connection notification with session_id
+            # This helps clients that need to know the session_id before sending requests
+            # Format: SSE comment (doesn't interfere with MCP protocol)
+            try:
+                # Send session_id as comment so client can extract it if needed
+                # This is non-blocking and doesn't interfere with MCP protocol
+                yield {
+                    "event": "comment",
+                    "data": f"session_id:{session_id}",
+                }
+                logger.info(f"SSE session {session_id} ready (client: {client_ip})")
+            except Exception as e:
+                logger.warning(f"Error sending session comment: {e}")
+                # Continue anyway - session_id is in header
             
-            # Don't send any initial message - just keep connection open
-            # Client will send initialize request to /mcp/message endpoint
+            # Now wait for client to send initialize request
+            logger.debug(f"Waiting for initialize request for session {session_id}")
 
             # Main message loop - keep connection alive
             while connection_alive and not session._closed:
@@ -431,19 +444,23 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
             
             logger.info(f"SSE session closed: {session_id} (client: {client_ip})")
 
-    return EventSourceResponse(
+    # Create SSE response with proper headers
+    response = EventSourceResponse(
         event_generator(),
         headers={
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable buffering for nginx/proxy
-            "X-Session-Id": session_id,
+            "X-Session-Id": session_id,  # Critical: client needs this to send messages
             "Content-Type": "text/event-stream; charset=utf-8",
             "Access-Control-Allow-Origin": "*",  # CORS for web clients
-            "Access-Control-Allow-Headers": "Cache-Control",
+            "Access-Control-Allow-Headers": "Cache-Control, X-Session-Id",
+            "Access-Control-Expose-Headers": "X-Session-Id",  # Allow client to read session_id
         },
-        ping=None,  # Disable automatic ping, we handle it manually
     )
+    
+    logger.debug(f"SSE response created for session {session_id} with headers")
+    return response
 
 
 async def mcp_message_endpoint(request: Request) -> JSONResponse:

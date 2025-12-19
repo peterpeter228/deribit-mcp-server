@@ -12,7 +12,16 @@ from typing import Optional
 import httpx
 
 
-async def test_sse_connection(base_url: str = "http://localhost:8005"):
+async def test_sse_connection(base_url: str = None):
+    """Test SSE connection and MCP protocol."""
+    # Auto-detect URL based on environment
+    if base_url is None:
+        import os
+        if os.path.exists("/.dockerenv"):
+            # Running inside Docker container
+            base_url = "http://localhost:8000"  # Container internal port
+        else:
+            base_url = "http://localhost:8005"  # Host port
     """Test SSE connection and MCP protocol."""
     print("=" * 60)
     print("MCP Client Test")
