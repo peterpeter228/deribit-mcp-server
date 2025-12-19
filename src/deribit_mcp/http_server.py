@@ -308,9 +308,17 @@ async def sse_endpoint(request: Request) -> EventSourceResponse:
         connection_alive = True
         try:
             # MCP SSE transport: announce message endpoint to client.
-            # Many clients require this `endpoint` event to know where to POST.
-            yield {"event": "endpoint", "data": MCP_MESSAGE_PATH}
-            logger.debug(f"SSE session {session_id} endpoint announced: {MCP_MESSAGE_PATH}")
+            #
+            # IMPORTANT: Some desktop GUI clients implement SSE using a browser-like
+            # EventSource API which CANNOT read response headers. In that case, the
+            # only way for the client to learn the session_id is via SSE data.
+            #
+            # To maximize compatibility, we include session_id in the endpoint URL
+            # (query param) AND also expose it via headers.
+            base = str(request.base_url).rstrip("/")
+            endpoint_url = f"{base}{MCP_MESSAGE_PATH}?session_id={session_id}"
+            yield {"event": "endpoint", "data": endpoint_url}
+            logger.debug(f"SSE session {session_id} endpoint announced: {endpoint_url}")
 
             # Main message loop - keep connection alive
             while connection_alive and not session._closed:
