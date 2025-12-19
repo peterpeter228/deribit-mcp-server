@@ -1,0 +1,78 @@
+# Docker Compose for Deribit MCP Server
+# Usage:
+#   docker-compose up -d        # Start in background
+#   docker-compose logs -f      # View logs
+#   docker-compose down         # Stop and remove
+
+version: "3.8"
+
+services:
+  deribit-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    container_name: deribit-mcp-server
+    
+    ports:
+      - "8000:8000"
+    
+    environment:
+      # Environment selection
+      - DERIBIT_ENV=${DERIBIT_ENV:-prod}
+      
+      # Private API (disabled by default)
+      - DERIBIT_ENABLE_PRIVATE=${DERIBIT_ENABLE_PRIVATE:-false}
+      
+      # Credentials (only needed if ENABLE_PRIVATE=true)
+      - DERIBIT_CLIENT_ID=${DERIBIT_CLIENT_ID:-}
+      - DERIBIT_CLIENT_SECRET=${DERIBIT_CLIENT_SECRET:-}
+      
+      # Network settings
+      - DERIBIT_TIMEOUT_S=${DERIBIT_TIMEOUT_S:-10}
+      - DERIBIT_MAX_RPS=${DERIBIT_MAX_RPS:-8}
+      
+      # Cache settings
+      - DERIBIT_CACHE_TTL_FAST=${DERIBIT_CACHE_TTL_FAST:-1.0}
+      - DERIBIT_CACHE_TTL_SLOW=${DERIBIT_CACHE_TTL_SLOW:-30.0}
+      
+      # Safety
+      - DERIBIT_DRY_RUN=${DERIBIT_DRY_RUN:-true}
+      
+      # Server settings
+      - DERIBIT_HOST=0.0.0.0
+      - DERIBIT_PORT=8000
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    
+    # Logging
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Notes:
+# 1. Create a .env file with your credentials (copy from .env.example)
+# 2. Run: docker-compose up -d
+# 3. Check health: curl http://localhost:8000/health
+# 4. View logs: docker-compose logs -f

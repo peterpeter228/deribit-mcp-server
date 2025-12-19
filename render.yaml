@@ -1,12 +1,62 @@
+# Render.com deployment configuration
+# https://render.com/docs/blueprint-spec
+
 services:
   - type: web
     name: deribit-mcp-server
-    env: node
-    plan: free
-    buildCommand: npm install
-    startCommand: node mcp-sse-oauth-server.js
+    runtime: python
+    region: oregon
+    plan: starter
+    
+    # Build configuration
+    buildCommand: |
+      pip install uv
+      uv sync --no-dev
+    
+    # Start command (HTTP/SSE mode)
+    startCommand: uv run deribit-mcp-http
+    
+    # Health check
+    healthCheckPath: /health
+    
+    # Environment variables
     envVars:
-      - key: PORT
-        value: 10000
-      - key: NODE_ENV
-        value: production
+      # Runtime settings
+      - key: DERIBIT_ENV
+        value: prod
+      - key: DERIBIT_ENABLE_PRIVATE
+        value: "false"
+      - key: DERIBIT_HOST
+        value: "0.0.0.0"
+      - key: DERIBIT_PORT
+        value: "10000"
+      
+      # Network settings
+      - key: DERIBIT_TIMEOUT_S
+        value: "10"
+      - key: DERIBIT_MAX_RPS
+        value: "8"
+      
+      # Cache settings
+      - key: DERIBIT_CACHE_TTL_FAST
+        value: "1.0"
+      - key: DERIBIT_CACHE_TTL_SLOW
+        value: "30.0"
+      
+      # Safety
+      - key: DERIBIT_DRY_RUN
+        value: "true"
+      
+      # Secrets (configure in Render dashboard)
+      - key: DERIBIT_CLIENT_ID
+        sync: false  # Must be set manually in dashboard
+      - key: DERIBIT_CLIENT_SECRET
+        sync: false  # Must be set manually in dashboard
+
+# Notes for deployment:
+# 1. Fork/clone this repo to your GitHub
+# 2. Create a new Blueprint on Render connected to your repo
+# 3. After deployment, set DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET
+#    in the Render dashboard under "Environment" if you need private API access
+# 4. The server will be available at https://your-app.onrender.com
+# 5. Connect your MCP client to https://your-app.onrender.com/sse
